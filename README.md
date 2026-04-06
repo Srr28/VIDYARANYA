@@ -280,9 +280,10 @@ Primary entities:
 **Contributors:**
 
 - Sama Ruthveek Reddy
-- Siddhant Kumar
-- Ravva Swati
-- Yashas
+- Prem Patel
+- Ved Chandorikar
+- Nihal Singh
+- S SUdharshan Reddy
 
 ---
 
