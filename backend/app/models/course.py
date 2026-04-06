@@ -20,5 +20,6 @@ class Course(Base):
     enrollments = relationship("Enrollment", back_populates="course", cascade="all, delete-orphan")
     notes = relationship("Note", back_populates="course", cascade="all, delete-orphan")
     assignments = relationship("Assignment", back_populates="course", cascade="all, delete-orphan")
+    projects = relationship("Project", back_populates="course", cascade="all, delete-orphan")
     chats = relationship("ChatMessage", back_populates="course", cascade="all, delete-orphan")
     announcements = relationship("Announcement", back_populates="course", cascade="all, delete-orphan")

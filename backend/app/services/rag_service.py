@@ -219,6 +219,41 @@ def _fallback_selected_material_chunks(collection, note_ids: list[int], question
     return selected, selected_meta
 
 
+def retrieve_course_context(course_id: int, query_text: str, max_chunks: int = 6) -> list[str]:
+    collection_name = f"course_{course_id}"
+    try:
+        collection = CHROMA_CLIENT.get_collection(name=collection_name)
+    except Exception:
+        return []
+
+    query = (query_text or "").strip()
+    if not query:
+        return []
+
+    try:
+        query_embedding = _encode_texts([query])
+        result = collection.query(query_embeddings=query_embedding, n_results=max_chunks)
+        documents = result.get("documents", [[]])[0] if result.get("documents") else []
+    except Exception:
+        try:
+            payload = collection.get(include=["documents"])
+            documents = payload.get("documents", []) if isinstance(payload, dict) else []
+        except Exception:
+            return []
+
+    selected: list[str] = []
+    seen: set[str] = set()
+    for doc in documents:
+        normalized = str(doc or "").strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        selected.append(normalized)
+        if len(selected) >= max_chunks:
+            break
+    return selected
+
+
 def chat(course_id: int, question: str, note_ids: list[int] | None = None) -> dict[str, list[str] | str]:
     selected_note_ids = sorted({note_id for note_id in (note_ids or []) if isinstance(note_id, int) and note_id > 0})
 

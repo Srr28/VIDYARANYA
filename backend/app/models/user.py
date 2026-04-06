@@ -21,5 +21,8 @@ class User(Base):
     teaching_courses = relationship("Course", back_populates="teacher", cascade="all, delete-orphan")
     enrollments = relationship("Enrollment", back_populates="student", cascade="all, delete-orphan")
     submissions = relationship("Submission", back_populates="student", cascade="all, delete-orphan")
+    projects = relationship("Project", back_populates="teacher", cascade="all, delete-orphan")
+    project_submissions = relationship("ProjectSubmission", back_populates="student", cascade="all, delete-orphan")
+    evaluations = relationship("Evaluation", back_populates="student", cascade="all, delete-orphan")
     chat_messages = relationship("ChatMessage", back_populates="user", cascade="all, delete-orphan")
     announcements = relationship("Announcement", back_populates="author", cascade="all, delete-orphan")
