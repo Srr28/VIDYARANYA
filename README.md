@@ -289,6 +289,6 @@ Primary entities:
 
 <div align="center">
 
-Built for modern classrooms | FastAPI + PostgreSQL + AI Tutor
+Built for modern classrooms | FastAPI + PostgreSQL + AI Tutor.
 
 </div>
