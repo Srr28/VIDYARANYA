@@ -23,6 +23,18 @@ class Settings(BaseSettings):
     BACKEND_CORS_ALLOW_ORIGIN_REGEX: str | None = (
         r"^https?://(localhost|127\.0\.0\.1|10(?:\.\d{1,3}){3}|172\.(?:1[6-9]|2\d|3[0-1])(?:\.\d{1,3}){2}|192\.168(?:\.\d{1,3}){2})(?::\d+)?$"
     )
+    # Cloudflare R2 Object Storage
+    R2_ACCOUNT_ID: str | None = None
+    R2_ACCESS_KEY_ID: str | None = None
+    R2_SECRET_ACCESS_KEY: str | None = None
+    R2_BUCKET_NAME: str = "vidyaranya-bucket"
+    STORAGE_BACKEND: str = "auto"
+
+    @property
+    def r2_endpoint_url(self) -> str | None:
+        if self.R2_ACCOUNT_ID:
+            return f"https://{self.R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+        return None
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

@@ -2,7 +2,8 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_db
@@ -11,13 +12,16 @@ from app.models.course import Course
 from app.models.enrollment import Enrollment
 from app.models.note import Note
 from app.models.user import User
-from app.services.ocr_service import extract_text
+from app.services.ocr_service import extract_text, extract_text_from_bytes
 from app.services.rag_service import delete_note_chunks, index_note
+from app.services.storage_service import get_note_key, storage_service
 
 router = APIRouter(prefix="/notes", tags=["notes"])
 
-UPLOAD_DIR = Path("uploads")
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+class NotePresignRequest(BaseModel):
+    filename: str
+    content_type: str = "application/pdf"
 
 
 def _has_course_access(db: Session, course: Course, current_user: User) -> bool:
@@ -49,12 +53,10 @@ def _note_payload(note: Note) -> dict:
     }
 
 
-@router.post("/upload")
-def upload_note(
-    file: UploadFile = File(...),
-    course_id: int = Form(...),
-    title: str = Form(...),
-    description: str = Form(default=""),
+@router.post("/courses/{course_id}/presign")
+def presign_note_upload(
+    course_id: int,
+    payload: NotePresignRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> dict:
@@ -62,19 +64,48 @@ def upload_note(
     if not course:
         raise HTTPException(status_code=404, detail="Course not found for this teacher")
 
-    original_name = Path(file.filename or "note").name
-    safe_name = f"{uuid4()}_{original_name}"
-    file_path = UPLOAD_DIR / safe_name
-    content = file.file.read()
-    file_path.write_bytes(content)
+    key = get_note_key(course_id, payload.filename)
+    return storage_service.generate_presigned_put_url(
+        key=key,
+        content_type=payload.content_type,
+    )
 
-    mime_type = file.content_type or ""
-    extracted_text = extract_text(str(file_path), mime_type)
+
+@router.post("/upload")
+def upload_note(
+    course_id: int = Form(...),
+    title: str = Form(...),
+    description: str = Form(default=""),
+    file: UploadFile | None = File(default=None),
+    file_key: str | None = Form(default=None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    course = db.query(Course).filter(Course.id == course_id, Course.teacher_id == current_user.id).first()
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found for this teacher")
+
+    if not file and not file_key:
+        raise HTTPException(status_code=400, detail="Either file or file_key must be provided")
+
+    if file_key:
+        saved_key = file_key
+        try:
+            content = storage_service.download_file_bytes(saved_key)
+            extracted_text = extract_text_from_bytes(content, filename=saved_key)
+        except Exception:
+            extracted_text = ""
+    else:
+        original_name = Path(file.filename or "note").name
+        saved_key = get_note_key(course_id, original_name)
+        content = file.file.read()
+        storage_service.upload_bytes(saved_key, content, content_type=file.content_type or "application/octet-stream")
+        extracted_text = extract_text_from_bytes(content, mime_type=file.content_type or "", filename=original_name)
 
     note = Note(
         course_id=course_id,
         title=title,
-        file_path=str(file_path),
+        file_path=saved_key,
         is_indexed=bool(extracted_text.strip()),
     )
     db.add(note)
@@ -84,7 +115,7 @@ def upload_note(
 
     announcement_content = f"New material uploaded: {title}"
     if description.strip():
-                announcement_content = f"{announcement_content}\n{description.strip()}"
+        announcement_content = f"{announcement_content}\n{description.strip()}"
 
     db.add(
         Announcement(
@@ -100,11 +131,12 @@ def upload_note(
 
 
 @router.get("/download/{note_id}")
+@router.get("/{note_id}/download")
 def download_note(
     note_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> FileResponse:
+):
     note = db.query(Note).filter(Note.id == note_id).first()
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
@@ -113,8 +145,14 @@ def download_note(
     if not course or not _has_course_access(db, course, current_user):
         raise HTTPException(status_code=403, detail="No access to this note")
 
+    if storage_service.is_r2_active:
+        url = storage_service.generate_presigned_get_url(note.file_path)
+        return RedirectResponse(url=url)
+
     file_path = Path(note.file_path)
-    if not file_path.exists():
+    if not file_path.is_file():
+        file_path = Path("uploads") / note.file_path
+    if not file_path.is_file():
         raise HTTPException(status_code=404, detail="File not found")
 
     return FileResponse(path=file_path, filename=_pretty_file_name(note.file_path), media_type="application/octet-stream")
@@ -151,17 +189,10 @@ def delete_note(
     if not course or course.teacher_id != current_user.id:
         raise HTTPException(status_code=403, detail="Only the class teacher can remove materials")
 
-    file_path = Path(note.file_path)
-
+    file_key = note.file_path
     delete_note_chunks(course_id=note.course_id, note_id=note.id)
     db.delete(note)
     db.commit()
 
-    if file_path.exists():
-        try:
-            file_path.unlink()
-        except OSError:
-            # File cleanup failures should not block DB-level deletion.
-            pass
-
+    storage_service.delete_file(file_key)
     return {"ok": True}

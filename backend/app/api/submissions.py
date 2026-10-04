@@ -2,7 +2,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -15,12 +15,15 @@ from app.models.submission_comment import SubmissionComment
 from app.models.user import User
 from app.schemas.assignment import SubmissionOverride
 from app.services.grading_service import grade
-from app.services.ocr_service import extract_text
+from app.services.ocr_service import extract_text, extract_text_from_bytes
+from app.services.storage_service import get_submission_key, storage_service
 
 router = APIRouter(prefix="/submissions", tags=["submissions"])
 
-UPLOAD_DIR = Path("uploads") / "submissions"
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+class SubmissionPresignRequest(BaseModel):
+    filename: str
+    content_type: str = "application/pdf"
 
 
 def _get_assignment_or_404(db: Session, assignment_id: int) -> Assignment:
@@ -73,10 +76,33 @@ class PrivateCommentCreate(BaseModel):
     content: str
 
 
+@router.post("/assignments/{assignment_id}/presign")
+def presign_submission_upload(
+    assignment_id: int,
+    payload: SubmissionPresignRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    assignment = _get_assignment_or_404(db, assignment_id)
+    course = _get_course_or_404(db, assignment.course_id)
+    if course.teacher_id == current_user.id:
+        raise HTTPException(status_code=403, detail="Classroom owner cannot submit this assignment")
+
+    if not _is_enrolled(db, assignment.course_id, current_user.id):
+        raise HTTPException(status_code=403, detail="You are not enrolled in this course")
+
+    key = get_submission_key(assignment_id, current_user.id, payload.filename)
+    return storage_service.generate_presigned_put_url(
+        key=key,
+        content_type=payload.content_type,
+    )
+
+
 @router.post("")
 def submit_assignment(
     assignment_id: int = Form(...),
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(default=None),
+    file_key: str | None = Form(default=None),
     private_comment: str = Form(default=""),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -89,13 +115,23 @@ def submit_assignment(
     if not _is_enrolled(db, assignment.course_id, current_user.id):
         raise HTTPException(status_code=403, detail="You are not enrolled in this course")
 
-    original_name = Path(file.filename or "submission").name
-    safe_name = f"{uuid4()}_{original_name}"
-    file_path = UPLOAD_DIR / safe_name
-    file_path.write_bytes(file.file.read())
+    if not file and not file_key:
+        raise HTTPException(status_code=400, detail="Either file or file_key must be provided")
 
-    mime_type = file.content_type or ""
-    extracted_text = extract_text(str(file_path), mime_type)
+    if file_key:
+        saved_key = file_key
+        try:
+            content = storage_service.download_file_bytes(saved_key)
+            extracted_text = extract_text_from_bytes(content, filename=saved_key)
+        except Exception:
+            extracted_text = ""
+    else:
+        original_name = Path(file.filename or "submission").name
+        saved_key = get_submission_key(assignment_id, current_user.id, original_name)
+        content = file.file.read()
+        storage_service.upload_bytes(saved_key, content, content_type=file.content_type or "application/octet-stream")
+        extracted_text = extract_text_from_bytes(content, mime_type=file.content_type or "", filename=original_name)
+
     grade_result = grade(extracted_text, assignment.rubric)
 
     submission = (
@@ -111,7 +147,7 @@ def submit_assignment(
         submission = Submission(
             assignment_id=assignment.id,
             student_id=current_user.id,
-            file_path=str(file_path),
+            file_path=saved_key,
             text_content=extracted_text,
             status="graded",
             ai_score=float(grade_result.get("total_score", 0)),
@@ -122,7 +158,7 @@ def submit_assignment(
         db.add(submission)
     else:
         previous_path = submission.file_path
-        submission.file_path = str(file_path)
+        submission.file_path = saved_key
         submission.text_content = extracted_text
         submission.status = "graded"
         submission.ai_score = float(grade_result.get("total_score", 0))
@@ -132,8 +168,8 @@ def submit_assignment(
 
     db.flush()
 
-    if previous_path and previous_path != str(file_path):
-        Path(previous_path).unlink(missing_ok=True)
+    if previous_path and previous_path != saved_key:
+        storage_service.delete_file(previous_path)
 
     trimmed_comment = private_comment.strip()
     if trimmed_comment:
@@ -253,7 +289,7 @@ def unsubmit_my_assignment(
         raise HTTPException(status_code=404, detail="Submission not found")
 
     db.query(SubmissionComment).filter(SubmissionComment.submission_id == submission.id).delete()
-    Path(submission.file_path).unlink(missing_ok=True)
+    storage_service.delete_file(submission.file_path)
     db.delete(submission)
     db.commit()
 
@@ -265,7 +301,7 @@ def download_submission_file(
     submission_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> FileResponse:
+):
     submission = db.query(Submission).filter(Submission.id == submission_id).first()
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
@@ -275,8 +311,14 @@ def download_submission_file(
     if not _can_access_submission(current_user, course, submission):
         raise HTTPException(status_code=403, detail="No access")
 
+    if storage_service.is_r2_active:
+        url = storage_service.generate_presigned_get_url(submission.file_path)
+        return RedirectResponse(url=url)
+
     file_path = Path(submission.file_path)
-    if not file_path.exists():
+    if not file_path.is_file():
+        file_path = Path("uploads") / submission.file_path
+    if not file_path.is_file():
         raise HTTPException(status_code=404, detail="File not found")
 
     return FileResponse(
