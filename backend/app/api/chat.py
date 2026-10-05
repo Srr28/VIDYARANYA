@@ -1,3 +1,5 @@
+import uuid
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -23,7 +25,7 @@ def chat_with_course_notes(
     if not course:
         raise HTTPException(status_code=404, detail="Course not found")
 
-    owns_course = course.teacher_id == current_user.id
+    owns_course = course.faculty_id == current_user.id
     enrollment = (
         db.query(Enrollment)
         .filter(
@@ -35,7 +37,7 @@ def chat_with_course_notes(
     if not owns_course and not enrollment:
         raise HTTPException(status_code=403, detail="No access to this course")
 
-    selected_note_ids = sorted({note_id for note_id in payload.note_ids if isinstance(note_id, int) and note_id > 0})
+    selected_note_ids = list({note_id for note_id in payload.note_ids if note_id})
 
     if selected_note_ids:
         existing_note_ids = {
@@ -51,9 +53,9 @@ def chat_with_course_notes(
             raise HTTPException(status_code=404, detail="One or more selected materials were not found in this course")
 
     rag_response = rag_chat(
-        course_id=payload.course_id,
+        course_id=str(payload.course_id),
         question=payload.message,
-        note_ids=selected_note_ids,
+        note_ids=[str(n) for n in selected_note_ids],
     )
 
     history = ChatMessage(

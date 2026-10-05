@@ -1,10 +1,12 @@
+import uuid
+
 from pydantic import BaseModel, Field
 
 
 class ChatRequest(BaseModel):
-    course_id: int
+    course_id: uuid.UUID
     message: str
-    note_ids: list[int] = Field(default_factory=list)
+    note_ids: list[uuid.UUID] = Field(default_factory=list)
 
 
 class ChatResponse(BaseModel):

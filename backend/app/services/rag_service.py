@@ -87,7 +87,7 @@ def _chunk_text(text: str, chunk_size: int = 512, overlap: int = 50) -> list[str
     return chunks
 
 
-def index_note(course_id: int, text: str, note_id: int | None = None) -> None:
+def index_note(course_id: int | str, text: str, note_id: int | str | None = None) -> None:
     collection_name = f"course_{course_id}"
     collection = CHROMA_CLIENT.get_or_create_collection(name=collection_name)
 
@@ -100,7 +100,7 @@ def index_note(course_id: int, text: str, note_id: int | None = None) -> None:
     metadata = [
         {
             "source": f"note:{note_id}" if note_id is not None else "note",
-            "note_id": note_id,
+            "note_id": str(note_id) if note_id is not None else "",
         }
         for _ in chunks
     ]
@@ -113,7 +113,7 @@ def index_note(course_id: int, text: str, note_id: int | None = None) -> None:
     )
 
 
-def delete_note_chunks(course_id: int, note_id: int) -> None:
+def delete_note_chunks(course_id: int | str, note_id: int | str) -> None:
     collection_name = f"course_{course_id}"
     try:
         collection = CHROMA_CLIENT.get_collection(name=collection_name)
@@ -121,7 +121,7 @@ def delete_note_chunks(course_id: int, note_id: int) -> None:
         return
 
     try:
-        collection.delete(where={"note_id": note_id})
+        collection.delete(where={"note_id": str(note_id)})
     except Exception:
         # Keep delete-material action resilient even if vector cleanup fails.
         return
@@ -146,7 +146,7 @@ def _general_chat(question: str) -> str:
     return "General chat is available, but Groq could not be reached right now. Please try again."
 
 
-def _query_selected_material_chunks(collection, query_embedding: list[list[float]], note_ids: list[int]) -> tuple[list[str], list[dict]]:
+def _query_selected_material_chunks(collection, query_embedding: list[list[float]], note_ids: list[str]) -> tuple[list[str], list[dict]]:
     all_documents: list[str] = []
     all_metadatas: list[dict] = []
     seen_docs: set[str] = set()
@@ -155,7 +155,7 @@ def _query_selected_material_chunks(collection, query_embedding: list[list[float
         result = collection.query(
             query_embeddings=query_embedding,
             n_results=6,
-            where={"note_id": note_id},
+            where={"note_id": str(note_id)},
         )
 
         documents = result.get("documents", [[]])[0] if result.get("documents") else []
@@ -167,7 +167,7 @@ def _query_selected_material_chunks(collection, query_embedding: list[list[float
                 continue
             seen_docs.add(normalized)
             all_documents.append(normalized)
-            meta = metadatas[idx] if idx < len(metadatas) and isinstance(metadatas[idx], dict) else {"source": f"note:{note_id}", "note_id": note_id}
+            meta = metadatas[idx] if idx < len(metadatas) and isinstance(metadatas[idx], dict) else {"source": f"note:{note_id}", "note_id": str(note_id)}
             all_metadatas.append(meta)
 
     return all_documents, all_metadatas
@@ -177,13 +177,13 @@ def _tokenize(text: str) -> set[str]:
     return {token for token in re.findall(r"[a-z0-9]+", (text or "").lower()) if len(token) > 2}
 
 
-def _fallback_selected_material_chunks(collection, note_ids: list[int], question: str, max_chunks: int = 8) -> tuple[list[str], list[dict]]:
+def _fallback_selected_material_chunks(collection, note_ids: list[str], question: str, max_chunks: int = 8) -> tuple[list[str], list[dict]]:
     question_tokens = _tokenize(question)
     ranked: list[tuple[int, str, dict]] = []
 
     for note_id in note_ids:
         try:
-            payload = collection.get(where={"note_id": note_id}, include=["documents", "metadatas"])
+            payload = collection.get(where={"note_id": str(note_id)}, include=["documents", "metadatas"])
         except Exception:
             continue
 
@@ -196,7 +196,7 @@ def _fallback_selected_material_chunks(collection, note_ids: list[int], question
                 continue
             doc_tokens = _tokenize(text)
             score = len(question_tokens.intersection(doc_tokens))
-            meta = metadatas[idx] if idx < len(metadatas) and isinstance(metadatas[idx], dict) else {"source": f"note:{note_id}", "note_id": note_id}
+            meta = metadatas[idx] if idx < len(metadatas) and isinstance(metadatas[idx], dict) else {"source": f"note:{note_id}", "note_id": str(note_id)}
             ranked.append((score, text, meta))
 
     if not ranked:
@@ -219,8 +219,8 @@ def _fallback_selected_material_chunks(collection, note_ids: list[int], question
     return selected, selected_meta
 
 
-def chat(course_id: int, question: str, note_ids: list[int] | None = None) -> dict[str, list[str] | str]:
-    selected_note_ids = sorted({note_id for note_id in (note_ids or []) if isinstance(note_id, int) and note_id > 0})
+def chat(course_id: int | str, question: str, note_ids: list[int | str] | None = None) -> dict[str, list[str] | str]:
+    selected_note_ids = sorted({str(note_id) for note_id in (note_ids or []) if note_id})
 
     if not selected_note_ids:
         return {

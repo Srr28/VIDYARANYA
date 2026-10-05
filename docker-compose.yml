@@ -1,5 +1,12 @@
 version: '3.8'
 
+# ============================================================
+# VIDYARANYA — Phase 2 Docker Compose
+# Local development stack with PostgreSQL, backend, frontend.
+# For Supabase: set DATABASE_URL in .env to your Supabase URI
+#   and comment out the "db" service.
+# ============================================================
+
 services:
   db:
     image: postgres:15-alpine
@@ -25,6 +32,10 @@ services:
       - "8000:8000"
     env_file:
       - .env
+    environment:
+      # Allows override via docker-compose env without editing .env
+      - DATABASE_URL=${DATABASE_URL:-postgresql://eduuser:srr28082006@db:5432/eduai_db}
+      - STORAGE_BACKEND=${STORAGE_BACKEND:-auto}
     depends_on:
       db:
         condition: service_healthy

@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from pathlib import Path
+import uuid
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
@@ -22,7 +23,7 @@ UPLOAD_DIR = Path("uploads") / "assignment_materials"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def _is_course_member(db: Session, course_id: int, user_id: int) -> bool:
+def _is_course_member(db: Session, course_id: uuid.UUID, user_id: uuid.UUID) -> bool:
     enrollment = (
         db.query(Enrollment)
         .filter(Enrollment.course_id == course_id, Enrollment.student_id == user_id)
@@ -32,7 +33,7 @@ def _is_course_member(db: Session, course_id: int, user_id: int) -> bool:
 
 
 def _can_access_course(course: Course, db: Session, current_user: User) -> bool:
-    if course.teacher_id == current_user.id:
+    if course.faculty_id == current_user.id:
         return True
     return _is_course_member(db, course.id, current_user.id)
 
@@ -55,7 +56,7 @@ def create_assignment(
 ) -> Assignment:
     course = (
         db.query(Course)
-        .filter(Course.id == payload.course_id, Course.teacher_id == current_user.id)
+        .filter(Course.id == payload.course_id, Course.faculty_id == current_user.id)
         .first()
     )
     if not course:
@@ -65,9 +66,12 @@ def create_assignment(
         course_id=payload.course_id,
         title=payload.title,
         description=payload.description,
-        rubric=payload.rubric,
+        topics_list=payload.topics_list or [],
+        rubric=payload.rubric or [],
+        reference_note_id=payload.reference_note_id,
+        ai_eval_enabled=payload.ai_eval_enabled,
         due_date=payload.due_date,
-        max_score=payload.max_score,
+        max_marks=payload.max_marks if payload.max_marks is not None else (payload.max_score or 100),
     )
     db.add(assignment)
     due_label = payload.due_date.strftime("%b %d, %Y %I:%M %p") if payload.due_date else "No due date"
@@ -85,7 +89,7 @@ def create_assignment(
 
 @router.get("", response_model=list[AssignmentOut])
 def list_assignments(
-    course_id: int,
+    course_id: uuid.UUID,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> list[Assignment]:
@@ -96,12 +100,17 @@ def list_assignments(
     if not _can_access_course(course, db, current_user):
         raise HTTPException(status_code=403, detail="No access to this course")
 
-    return db.query(Assignment).filter(Assignment.course_id == course_id).order_by(Assignment.id.desc()).all()
+    return (
+        db.query(Assignment)
+        .filter(Assignment.course_id == course_id)
+        .order_by(Assignment.created_at.desc())
+        .all()
+    )
 
 
 @router.patch("/{assignment_id}", response_model=AssignmentOut)
 def update_assignment_due_date(
-    assignment_id: int,
+    assignment_id: uuid.UUID,
     payload: AssignmentDueDateUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -111,7 +120,7 @@ def update_assignment_due_date(
         raise HTTPException(status_code=404, detail="Assignment not found")
 
     course = db.query(Course).filter(Course.id == assignment.course_id).first()
-    if not course or course.teacher_id != current_user.id:
+    if not course or course.faculty_id != current_user.id:
         raise HTTPException(status_code=403, detail="Only the classroom owner can update due date")
 
     assignment.due_date = payload.due_date
@@ -122,7 +131,7 @@ def update_assignment_due_date(
 
 @router.post("/{assignment_id}/end", response_model=AssignmentOut)
 def end_assignment(
-    assignment_id: int,
+    assignment_id: uuid.UUID,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> Assignment:
@@ -131,7 +140,7 @@ def end_assignment(
         raise HTTPException(status_code=404, detail="Assignment not found")
 
     course = db.query(Course).filter(Course.id == assignment.course_id).first()
-    if not course or course.teacher_id != current_user.id:
+    if not course or course.faculty_id != current_user.id:
         raise HTTPException(status_code=403, detail="Only the classroom owner can end assignments")
 
     assignment.due_date = datetime.now(timezone.utc)
@@ -142,7 +151,7 @@ def end_assignment(
 
 @router.delete("/{assignment_id}")
 def delete_assignment(
-    assignment_id: int,
+    assignment_id: uuid.UUID,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> dict:
@@ -151,7 +160,7 @@ def delete_assignment(
         raise HTTPException(status_code=404, detail="Assignment not found")
 
     course = db.query(Course).filter(Course.id == assignment.course_id).first()
-    if not course or course.teacher_id != current_user.id:
+    if not course or course.faculty_id != current_user.id:
         raise HTTPException(status_code=403, detail="Only the classroom owner can delete assignments")
 
     attachments = db.query(AssignmentAttachment).filter(AssignmentAttachment.assignment_id == assignment_id).all()
@@ -163,19 +172,19 @@ def delete_assignment(
             path.unlink(missing_ok=True)
 
     for item in submissions:
-        path = Path(item.file_path)
+        path = Path(item.file_key)
         if path.exists():
             path.unlink(missing_ok=True)
 
     db.delete(assignment)
     db.commit()
 
-    return {"message": "Assignment deleted", "assignment_id": assignment_id}
+    return {"message": "Assignment deleted", "assignment_id": str(assignment_id)}
 
 
 @router.post("/{assignment_id}/attachments")
 def upload_assignment_attachment(
-    assignment_id: int,
+    assignment_id: uuid.UUID,
     file: UploadFile = File(...),
     title: str = Form(""),
     db: Session = Depends(get_db),
@@ -186,7 +195,7 @@ def upload_assignment_attachment(
         raise HTTPException(status_code=404, detail="Assignment not found")
 
     course = db.query(Course).filter(Course.id == assignment.course_id).first()
-    if not course or course.teacher_id != current_user.id:
+    if not course or course.faculty_id != current_user.id:
         raise HTTPException(status_code=403, detail="Only the classroom owner can upload attachments")
 
     original_name = Path(file.filename or "attachment").name
@@ -209,7 +218,7 @@ def upload_assignment_attachment(
 
 @router.get("/{assignment_id}/attachments")
 def list_assignment_attachments(
-    assignment_id: int,
+    assignment_id: uuid.UUID,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> list[dict]:
@@ -224,7 +233,7 @@ def list_assignment_attachments(
     rows = (
         db.query(AssignmentAttachment)
         .filter(AssignmentAttachment.assignment_id == assignment_id)
-        .order_by(AssignmentAttachment.id.desc())
+        .order_by(AssignmentAttachment.created_at.desc())
         .all()
     )
     return [_attachment_payload(item) for item in rows]
@@ -232,7 +241,7 @@ def list_assignment_attachments(
 
 @router.get("/attachments/{attachment_id}/download")
 def download_assignment_attachment(
-    attachment_id: int,
+    attachment_id: uuid.UUID,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> FileResponse:

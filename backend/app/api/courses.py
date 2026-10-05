@@ -1,5 +1,6 @@
 import random
 import string
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -32,11 +33,11 @@ def generate_unique_join_code(db: Session) -> str:
             return code
 
 
-def pick_banner_color(db: Session, teacher_id: int) -> str:
+def pick_banner_color(db: Session, teacher_id: uuid.UUID) -> str:
     used_colors = {
         item[0]
         for item in db.query(Course.banner_color)
-        .filter(Course.teacher_id == teacher_id)
+        .filter(Course.faculty_id == teacher_id)
         .all()
         if item and item[0]
     }
@@ -46,7 +47,7 @@ def pick_banner_color(db: Session, teacher_id: int) -> str:
     return random.choice(COURSE_BANNER_COLORS)
 
 
-def _is_enrolled(db: Session, user_id: int, course_id: int) -> bool:
+def _is_enrolled(db: Session, user_id: uuid.UUID, course_id: uuid.UUID) -> bool:
     enrollment = (
         db.query(Enrollment)
         .filter(Enrollment.student_id == user_id, Enrollment.course_id == course_id)
@@ -56,7 +57,7 @@ def _is_enrolled(db: Session, user_id: int, course_id: int) -> bool:
 
 
 def _can_access_course(db: Session, user: User, course: Course) -> bool:
-    if course.teacher_id == user.id:
+    if course.faculty_id == user.id:
         return True
     return _is_enrolled(db, user.id, course.id)
 
@@ -67,17 +68,18 @@ def create_course(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> Course:
-    if current_user.role != "teacher":
-        current_user.role = "teacher"
+    if current_user.role not in {"faculty", "teacher", "admin"}:
+        current_user.role = "faculty"
         db.commit()
         db.refresh(current_user)
 
     join_code = generate_unique_join_code(db)
     course = Course(
         name=payload.name,
+        subject=payload.subject,
         section=payload.section,
         description=payload.description,
-        teacher_id=current_user.id,
+        faculty_id=current_user.id,
         join_code=join_code,
         banner_color=pick_banner_color(db, current_user.id),
     )
@@ -92,7 +94,7 @@ def list_courses(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> list[Course]:
-    owned_courses = db.query(Course).filter(Course.teacher_id == current_user.id).all()
+    owned_courses = db.query(Course).filter(Course.faculty_id == current_user.id).all()
     joined_courses = (
         db.query(Course)
         .join(Enrollment, Enrollment.course_id == Course.id)
@@ -100,7 +102,7 @@ def list_courses(
         .all()
     )
 
-    merged: dict[int, Course] = {course.id: course for course in owned_courses}
+    merged: dict[uuid.UUID, Course] = {course.id: course for course in owned_courses}
     for course in joined_courses:
         merged[course.id] = course
     return list(merged.values())
@@ -111,13 +113,13 @@ def join_course(
     payload: CourseJoinRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> dict[str, str | int]:
+) -> dict[str, str | uuid.UUID]:
     normalized_code = payload.code.strip().upper()
     course = db.query(Course).filter(Course.join_code == normalized_code).first()
     if not course:
         raise HTTPException(status_code=404, detail="Course not found")
 
-    if course.teacher_id == current_user.id:
+    if course.faculty_id == current_user.id:
         return {"message": "You are the classroom owner", "course_id": course.id}
 
     existing = (
@@ -137,10 +139,10 @@ def join_course(
 
 @router.get("/{course_id}/people")
 def get_course_people(
-    course_id: int,
+    course_id: uuid.UUID,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> dict[str, list[dict[str, int | str | None]]]:
+) -> dict[str, list[dict[str, uuid.UUID | str | None]]]:
     course = db.query(Course).filter(Course.id == course_id).first()
     if not course:
         raise HTTPException(status_code=404, detail="Course not found")
@@ -148,12 +150,12 @@ def get_course_people(
     if not _can_access_course(db, current_user, course):
         raise HTTPException(status_code=403, detail="No access to this course")
 
-    teacher = db.query(User).filter(User.id == course.teacher_id).first()
+    teacher = db.query(User).filter(User.id == course.faculty_id).first()
     students = (
         db.query(User)
         .join(Enrollment, Enrollment.student_id == User.id)
         .filter(Enrollment.course_id == course.id)
-        .order_by(User.name.asc())
+        .order_by(User.full_name.asc())
         .all()
     )
 
@@ -182,16 +184,16 @@ def get_course_people(
 
 @router.delete("/{course_id}/students/{student_id}")
 def remove_student_from_course(
-    course_id: int,
-    student_id: int,
+    course_id: uuid.UUID,
+    student_id: uuid.UUID,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> dict[str, str | int]:
+) -> dict[str, str | uuid.UUID]:
     course = db.query(Course).filter(Course.id == course_id).first()
     if not course:
         raise HTTPException(status_code=404, detail="Course not found")
 
-    if course.teacher_id != current_user.id:
+    if course.faculty_id != current_user.id:
         raise HTTPException(status_code=403, detail="Only the classroom owner can remove students")
 
     enrollment = (

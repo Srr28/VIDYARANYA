@@ -2,7 +2,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import models  # noqa: F401
-from app.api import announcements, assignments, auth, chat, courses, notes, submissions, users
+from app.api import analytics, announcements, assignments, auth, chat, courses, notes, submissions, users
 from app.core.config import settings
 from app.core.database import Base, engine
 
@@ -41,6 +41,7 @@ app.include_router(assignments.router)
 app.include_router(submissions.router)
 app.include_router(chat.router)
 app.include_router(users.router)
+app.include_router(analytics.router)
 
 
 @app.get("/")

@@ -1,3 +1,5 @@
+import uuid
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -12,12 +14,12 @@ router = APIRouter(prefix="/announcements", tags=["announcements"])
 
 
 class AnnouncementCreate(BaseModel):
-    course_id: int
+    course_id: uuid.UUID
     content: str
 
 
 def _can_access_course(db: Session, current_user: User, course: Course) -> bool:
-    if course.teacher_id == current_user.id:
+    if course.faculty_id == current_user.id:
         return True
     enrollment = (
         db.query(Enrollment)
@@ -29,7 +31,7 @@ def _can_access_course(db: Session, current_user: User, course: Course) -> bool:
 
 @router.get("/{course_id}")
 def list_announcements(
-    course_id: int,
+    course_id: uuid.UUID,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> list[dict]:
@@ -42,7 +44,7 @@ def list_announcements(
     rows = (
         db.query(Announcement)
         .filter(Announcement.course_id == course_id)
-        .order_by(Announcement.id.desc())
+        .order_by(Announcement.created_at.desc())
         .all()
     )
 
@@ -69,7 +71,7 @@ def create_announcement(
     course = db.query(Course).filter(Course.id == payload.course_id).first()
     if not course:
         raise HTTPException(status_code=404, detail="Course not found")
-    if course.teacher_id != current_user.id:
+    if course.faculty_id != current_user.id:
         raise HTTPException(status_code=403, detail="Only the classroom owner can post announcements")
 
     content = payload.content.strip()

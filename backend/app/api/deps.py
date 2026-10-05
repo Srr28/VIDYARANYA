@@ -1,3 +1,4 @@
+import uuid
 from typing import Generator
 
 from fastapi import Depends, HTTPException, status
@@ -36,25 +37,28 @@ def get_current_user(
         user_id = payload.get("sub")
         if user_id is None:
             raise credentials_exception
-        user_id_int = int(user_id)
+        try:
+            user_uuid = uuid.UUID(str(user_id))
+        except (TypeError, ValueError):
+            user_uuid = user_id
     except JWTError as exc:
         raise credentials_exception from exc
     except (TypeError, ValueError) as exc:
         raise credentials_exception from exc
 
-    user = db.query(User).filter(User.id == user_id_int).first()
+    user = db.query(User).filter(User.id == user_uuid).first()
     if not user or not user.is_active:
         raise credentials_exception
     return user
 
 
 def get_current_teacher(current_user: User = Depends(get_current_user)) -> User:
-    if current_user.role != "teacher":
-        raise HTTPException(status_code=403, detail="Teacher access required")
+    if current_user.role not in {"teacher", "faculty", "admin"}:
+        raise HTTPException(status_code=403, detail="Faculty or Teacher access required")
     return current_user
 
 
 def get_current_student(current_user: User = Depends(get_current_user)) -> User:
-    if current_user.role != "student":
+    if current_user.role not in {"student", "admin"}:
         raise HTTPException(status_code=403, detail="Student access required")
     return current_user

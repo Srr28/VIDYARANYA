@@ -36,7 +36,7 @@ class Settings(BaseSettings):
             return f"https://{self.R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
         return None
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=(".env", "../.env"), extra="ignore")
 
     @field_validator("BACKEND_CORS_ORIGINS", mode="before")
     @classmethod
