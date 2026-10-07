@@ -1,0 +1,88 @@
+version: '3.8'
+
+# ============================================================
+# VIDYARANYA — Phase 3 Docker Compose
+# Local development stack with PostgreSQL, Redis, Worker, Backend, Frontend.
+# For Supabase: set DATABASE_URL in .env to your Supabase URI
+#   and comment out the "db" service.
+# ============================================================
+
+services:
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: eduuser
+      POSTGRES_PASSWORD: srr28082006
+      POSTGRES_DB: eduai_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U eduuser -d eduai_db"]
+      interval: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 5
+
+  backend:
+    build: ./backend
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - ./backend:/app
+      - ./uploads:/app/uploads
+      - ./chroma_db:/app/chroma_db
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      # Allows override via docker-compose env without editing .env
+      - DATABASE_URL=${DATABASE_URL:-postgresql://eduuser:srr28082006@db:5432/eduai_db}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - STORAGE_BACKEND=${STORAGE_BACKEND:-auto}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build: ./backend
+    command: arq app.worker.WorkerSettings
+    volumes:
+      - ./backend:/app
+      - ./uploads:/app/uploads
+      - ./chroma_db:/app/chroma_db
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=${DATABASE_URL:-postgresql://eduuser:srr28082006@db:5432/eduai_db}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - STORAGE_BACKEND=${STORAGE_BACKEND:-auto}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  frontend:
+    image: nginx:alpine
+    volumes:
+      - ./stitch_output:/usr/share/nginx/html
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
+  redis_data:
