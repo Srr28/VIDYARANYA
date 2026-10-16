@@ -1,3 +1,5 @@
+import asyncio
+import logging
 from pathlib import Path
 import uuid
 
@@ -12,13 +14,20 @@ from app.models.course import Course
 from app.models.enrollment import Enrollment
 from app.models.note import Note
 from app.models.user import User
-from app.services.ocr_service import extract_text_from_bytes
 from app.services.queue_service import queue_service
 from app.services.rag_service import delete_note_chunks
 from app.services.storage_service import get_note_key, storage_service
 import app.worker  # noqa: F401
 
 router = APIRouter(prefix="/notes", tags=["notes"])
+logger = logging.getLogger("vidyaranya.notes")
+
+
+async def _enqueue_note_indexing(note_id: uuid.UUID) -> None:
+    try:
+        await queue_service.enqueue_note_indexing(note_id)
+    except Exception:
+        logger.exception("Could not enqueue note indexing for %s", note_id)
 
 
 class NotePresignRequest(BaseModel):
@@ -98,18 +107,21 @@ async def upload_note(
     if file_key:
         saved_key = file_key
         file_extension = Path(file_key).suffix.lstrip(".").lower()
+        expected_prefix = f"courses/{course_id}/notes/"
         try:
-            content = storage_service.download_file_bytes(saved_key)
-            extracted_text = extract_text_from_bytes(content, filename=saved_key)
-        except Exception:
-            extracted_text = ""
+            exists = saved_key.startswith(expected_prefix) and storage_service.object_exists(saved_key)
+        except ValueError as exc:
+            raise HTTPException(status_code=413, detail=str(exc)) from exc
+        if not exists:
+            raise HTTPException(status_code=400, detail="Uploaded note object was not found")
+        extracted_text = ""
     else:
         original_name = Path(file.filename or "note").name
         file_extension = Path(original_name).suffix.lstrip(".").lower()
         saved_key = get_note_key(str(course_id), original_name)
         content = file.file.read()
         storage_service.upload_bytes(saved_key, content, content_type=file.content_type or "application/octet-stream")
-        extracted_text = extract_text_from_bytes(content, mime_type=file.content_type or "", filename=original_name)
+        extracted_text = ""
 
     note = Note(
         course_id=course_id,
@@ -137,7 +149,7 @@ async def upload_note(
     db.refresh(note)
 
     # Decoupled note indexing via background queue (Phase 3)
-    await queue_service.enqueue_note_indexing(note.id)
+    asyncio.create_task(_enqueue_note_indexing(note.id))
 
     return _note_payload(note)
 

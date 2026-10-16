@@ -1,9 +1,11 @@
+import asyncio
+import logging
 from pathlib import Path
 import uuid
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -17,12 +19,26 @@ from app.models.submission_text import SubmissionText
 from app.models.user import User
 from app.schemas.assignment import SubmissionOverride
 from app.services.grading_service import grade
-from app.services.ocr_service import extract_text_from_bytes
 from app.services.queue_service import queue_service
 from app.services.storage_service import get_submission_key, storage_service
 import app.worker  # noqa: F401
 
 router = APIRouter(prefix="/submissions", tags=["submissions"])
+logger = logging.getLogger("vidyaranya.submissions")
+
+
+async def _enqueue_submission_evaluation(submission_id: uuid.UUID) -> None:
+    try:
+        await queue_service.enqueue_submission_evaluation(submission_id)
+    except Exception:
+        logger.exception("Could not enqueue submission evaluation for %s", submission_id)
+
+
+async def _delete_previous_submission_file(file_key: str) -> None:
+    try:
+        await asyncio.to_thread(storage_service.delete_file, file_key)
+    except Exception:
+        logger.exception("Could not delete replaced submission file %s", file_key)
 
 
 class SubmissionPresignRequest(BaseModel):
@@ -174,18 +190,22 @@ async def _handle_submission(
         raise HTTPException(status_code=400, detail="Either file or file_key must be provided")
 
     if file_key:
+        expected_prefix = f"submissions/{assignment_id}/{current_user.id}/"
+        if not file_key.startswith(expected_prefix):
+            raise HTTPException(status_code=400, detail="Invalid submission file key")
+        # The presigned PUT has already uploaded the object. Avoid a second
+        # network round-trip here so submission registration stays non-blocking.
         saved_key = file_key
-        try:
-            content = storage_service.download_file_bytes(saved_key)
-            extracted_text = extract_text_from_bytes(content, filename=saved_key)
-        except Exception:
-            extracted_text = ""
+        extracted_text = ""
     else:
         original_name = Path(file.filename or "submission").name
         saved_key = get_submission_key(str(assignment_id), str(current_user.id), original_name)
         content = file.file.read()
-        storage_service.upload_bytes(saved_key, content, content_type=file.content_type or "application/octet-stream")
-        extracted_text = extract_text_from_bytes(content, mime_type=file.content_type or "", filename=original_name)
+        try:
+            storage_service.upload_bytes(saved_key, content, content_type=file.content_type or "application/octet-stream")
+        except ValueError as exc:
+            raise HTTPException(status_code=413, detail=str(exc)) from exc
+        extracted_text = ""
 
     submission = (
         db.query(Submission)
@@ -236,7 +256,7 @@ async def _handle_submission(
         sub_text.raw_text = extracted_text
 
     if previous_path and previous_path != saved_key:
-        storage_service.delete_file(previous_path)
+        asyncio.create_task(_delete_previous_submission_file(previous_path))
 
     trimmed_comment = private_comment.strip()
     if trimmed_comment:
@@ -252,7 +272,9 @@ async def _handle_submission(
     db.refresh(submission)
 
     # Decoupled Asynchronous Evaluation Queue (Phase 3)
-    await queue_service.enqueue_submission_evaluation(submission.id)
+    # Do not wait for Redis connection setup in the HTTP request. The API can
+    # return pending_eval immediately while this task hands work to ARQ.
+    asyncio.create_task(_enqueue_submission_evaluation(submission.id))
 
     return {
         "id": submission.id,
@@ -266,7 +288,7 @@ async def _handle_submission(
     }
 
 
-@router.get("/{submission_id}")
+@router.get("/{submission_id:uuid}")
 def get_submission(
     submission_id: uuid.UUID,
     db: Session = Depends(get_db),
@@ -379,7 +401,7 @@ def unsubmit_my_assignment(
     return {"assignment_id": str(assignment_id), "message": "Submission removed"}
 
 
-@router.get("/{submission_id}/download")
+@router.get("/{submission_id:uuid}/download")
 def download_submission_file(
     submission_id: uuid.UUID,
     db: Session = Depends(get_db),
@@ -394,13 +416,22 @@ def download_submission_file(
     if not _can_access_submission(current_user, course, submission):
         raise HTTPException(status_code=403, detail="No access")
 
-    if storage_service.is_r2_active:
-        url = storage_service.generate_presigned_get_url(submission.file_key)
-        return RedirectResponse(url=url)
-
     file_path = Path(submission.file_key)
     if not file_path.is_file():
-        file_path = Path("uploads") / submission.file_key
+        legacy_path = Path("uploads") / submission.file_key
+        if legacy_path.is_file():
+            file_path = legacy_path
+
+    if storage_service.is_r2_active and not file_path.is_file():
+        try:
+            content = storage_service.download_file_bytes(submission.file_key)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="File not found") from exc
+        return Response(
+            content=content,
+            media_type="application/octet-stream",
+        )
+
     if not file_path.is_file():
         raise HTTPException(status_code=404, detail="File not found")
 
@@ -453,7 +484,7 @@ def list_submissions_for_assignment(
     }
 
 
-@router.get("/{submission_id}/comments")
+@router.get("/{submission_id:uuid}/comments")
 def list_private_comments(
     submission_id: uuid.UUID,
     db: Session = Depends(get_db),
@@ -503,7 +534,7 @@ def list_private_comments(
     }
 
 
-@router.post("/{submission_id}/comments")
+@router.post("/{submission_id:uuid}/comments")
 def add_private_comment(
     submission_id: uuid.UUID,
     payload: PrivateCommentCreate,
@@ -706,7 +737,7 @@ def grade_submission(
     return override_submission(submission_id, payload, db, current_user)
 
 
-@router.get("/ai/status/{submission_id}")
+@router.get("/ai/status/{submission_id:uuid}")
 def get_ai_evaluation_status(
     submission_id: uuid.UUID,
     db: Session = Depends(get_db),

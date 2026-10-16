@@ -476,6 +476,32 @@ async function downloadProtectedFile(endpoint, fileName = "download") {
   window.URL.revokeObjectURL(objectUrl);
 }
 
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+
+async function uploadDirectToR2(presignEndpoint, file) {
+  if (!file || file.size > MAX_UPLOAD_BYTES) {
+    throw new Error("Each file must be 10 MB or smaller");
+  }
+
+  const presign = await apiCall(presignEndpoint, "POST", {
+    filename: file.name,
+    content_type: file.type || "application/octet-stream",
+  });
+
+  // Keep multipart fallback support when running without R2.
+  if (presign?.backend !== "r2" || !presign.upload_url) return null;
+
+  const uploadResponse = await fetch(presign.upload_url, {
+    method: presign.method || "PUT",
+    headers: presign.headers || { "Content-Type": file.type || "application/octet-stream" },
+    body: file,
+  });
+  if (!uploadResponse.ok) {
+    throw new Error(`Storage upload failed (${uploadResponse.status})`);
+  }
+  return presign.file_key;
+}
+
 function setCourseQuery(courseId) {
   const params = new URLSearchParams(window.location.search);
   if (courseId) params.set("id", String(courseId));
@@ -492,11 +518,18 @@ function clearNewUserQueryFlag() {
 }
 
 function currentCourse() {
-  return appState.courses.find((course) => Number(course.id) === Number(appState.currentCourseId)) || null;
+  return appState.courses.find((course) => sameId(course.id, appState.currentCourseId)) || null;
 }
 
 function isCourseOwner(course) {
-  return Number(course.teacher_id) === Number(appState.user?.id || 0);
+  return sameId(course.teacher_id, appState.user?.id);
+}
+
+// Course and user IDs are UUIDs. Keep them as strings instead of coercing them
+// to numbers, which turns UUIDs into NaN and prevents classroom lookup.
+function sameId(left, right) {
+  return left !== null && left !== undefined && right !== null && right !== undefined
+    && String(left) === String(right);
 }
 
 function avatarText(name) {
@@ -517,8 +550,9 @@ function darkenHex(hexColor, amount = 18) {
 }
 
 function classroomColor(course) {
-  const id = Number(course?.id || 0);
-  const fallback = CLASSROOM_COLORS[Math.abs(id) % CLASSROOM_COLORS.length];
+  const id = String(course?.id || "");
+  const hash = [...id].reduce((total, character) => total + character.charCodeAt(0), 0);
+  const fallback = CLASSROOM_COLORS[hash % CLASSROOM_COLORS.length];
   const raw = String(course?.banner_color || "").toLowerCase();
   if (!raw || raw === "#1a73e8") return fallback;
   return raw;
@@ -1189,7 +1223,7 @@ async function renderClassesDashboard() {
 
   main.querySelectorAll("[data-open-class]").forEach((button) => {
     button.addEventListener("click", () => {
-      const id = Number(button.getAttribute("data-open-class"));
+      const id = button.getAttribute("data-open-class"); // Keep as string UUID
       appState.currentCourseId = id;
       appState.currentTab = "stream";
       setCourseQuery(id);
@@ -1199,8 +1233,8 @@ async function renderClassesDashboard() {
 
   main.querySelectorAll("[data-menu-class]").forEach((button) => {
     button.addEventListener("click", async () => {
-      const id = Number(button.getAttribute("data-menu-class"));
-      const course = appState.courses.find((item) => Number(item.id) === id);
+      const id = button.getAttribute("data-menu-class");
+      const course = appState.courses.find((item) => sameId(item.id, id));
       if (!course) return;
       openClassActionsModal(course);
     });
@@ -1311,12 +1345,14 @@ function getAiMessages(courseId) {
 function getAiSelectedNotes(courseId) {
   const value = appState.aiSelectedNotesByCourse[courseId];
   if (!Array.isArray(value)) return [];
-  return value.filter((item) => Number.isInteger(item) && item > 0);
+  return value.filter((item) => item !== null && item !== undefined && String(item).trim());
 }
 
 function setAiSelectedNotes(courseId, noteIds) {
   const cleaned = Array.isArray(noteIds)
-    ? [...new Set(noteIds.filter((item) => Number.isInteger(item) && item > 0))]
+    ? [...new Set(noteIds
+      .filter((item) => item !== null && item !== undefined && String(item).trim())
+      .map((item) => String(item)))]
     : [];
   appState.aiSelectedNotesByCourse[courseId] = cleaned;
 }
@@ -1327,10 +1363,10 @@ function resolveAiSourceLabel(source, notes) {
   if (value === "note") return "Course materials";
 
   if (value.startsWith("note:")) {
-    const noteId = Number(value.slice(5));
-    const note = (notes || []).find((item) => Number(item.id) === noteId);
+    const noteId = value.slice(5);
+    const note = (notes || []).find((item) => sameId(item.id, noteId));
     if (note) return note.title || note.file_name || `Material ${noteId}`;
-    if (Number.isFinite(noteId)) return `Material ${noteId}`;
+    if (noteId) return `Material ${noteId}`;
   }
 
   return value;
@@ -1494,14 +1530,16 @@ function openCreateMaterialModal(courseId) {
     try {
       const createdNotes = [];
       for (const file of files) {
-        const formData = new FormData();
-        formData.append("course_id", String(courseId));
         const computedTitle = files.length === 1
           ? (titleBase || file.name)
           : (titleBase ? `${titleBase} - ${file.name}` : file.name);
+        const fileKey = await uploadDirectToR2(`/notes/courses/${courseId}/presign`, file);
+        const formData = new FormData();
+        formData.append("course_id", String(courseId));
         formData.append("title", computedTitle);
         formData.append("description", description);
-        formData.append("file", file);
+        if (fileKey) formData.append("file_key", fileKey);
+        else formData.append("file", file);
         const note = await apiCall("/notes/upload", "POST", formData);
         createdNotes.push(note);
       }
@@ -1561,10 +1599,20 @@ function openCreateAssignmentModal(courseId) {
 
       if (files.length) {
         for (const file of files) {
-          const formData = new FormData();
-          formData.append("title", file.name || "Attachment");
-          formData.append("file", file);
-          await apiCall(`/assignments/${assignment.id}/attachments`, "POST", formData);
+          const fileKey = await uploadDirectToR2(`/assignments/${assignment.id}/attachments/presign`, file);
+          if (fileKey) {
+            await apiCall(`/assignments/${assignment.id}/attachments/register`, "POST", {
+              file_key: fileKey,
+              file_name: file.name,
+              title: file.name || "Attachment",
+              mime_type: file.type || "application/octet-stream",
+            });
+          } else {
+            const formData = new FormData();
+            formData.append("title", file.name || "Attachment");
+            formData.append("file", file);
+            await apiCall(`/assignments/${assignment.id}/attachments`, "POST", formData);
+          }
         }
       }
 
@@ -1772,7 +1820,7 @@ function renderClasswork(course, owner) {
   const view = getClassworkView(courseId);
 
   if (view.mode === "detail" && view.type === "material") {
-    const note = notes.find((item) => Number(item.id) === Number(view.id));
+    const note = notes.find((item) => sameId(item.id, view.id));
     if (!note) {
       setClassworkView(courseId, "list");
       return renderClasswork(course, owner);
@@ -1799,7 +1847,7 @@ function renderClasswork(course, owner) {
   }
 
   if (view.mode === "detail" && view.type === "assignment") {
-    const assignment = assignments.find((item) => Number(item.id) === Number(view.id));
+    const assignment = assignments.find((item) => sameId(item.id, view.id));
     if (!assignment) {
       setClassworkView(courseId, "list");
       return renderClasswork(course, owner);
@@ -2141,7 +2189,7 @@ function renderClassroomAI(courseId) {
   const noteChecklist = notes.length
     ? notes
       .map((note) => {
-        const noteId = Number(note.id);
+        const noteId = String(note.id);
         const checked = selectedNoteIds.includes(noteId) ? "checked" : "";
         const title = note.title || note.file_name || `Material ${noteId}`;
         return `
@@ -2326,11 +2374,11 @@ function renderNotifications() {
 }
 
 async function openGradeAssignmentModal(courseId, assignmentId) {
-  const assignment = (appState.assignmentsByCourse[courseId] || []).find((item) => Number(item.id) === Number(assignmentId));
+  const assignment = (appState.assignmentsByCourse[courseId] || []).find((item) => sameId(item.id, assignmentId));
   if (!assignment) return;
 
   const studentMap = new Map(
-    (appState.peopleByCourse[courseId]?.students || []).map((student) => [Number(student.id), student.name || `Student ${student.id}`]),
+    (appState.peopleByCourse[courseId]?.students || []).map((student) => [String(student.id), student.name || `Student ${student.id}`]),
   );
 
   const modal = openModal(
@@ -2345,7 +2393,7 @@ async function openGradeAssignmentModal(courseId, assignmentId) {
 
     return submissions
       .map((item) => {
-        const studentName = studentMap.get(Number(item.student_id)) || `Student ${item.student_id}`;
+        const studentName = studentMap.get(String(item.student_id)) || `Student ${item.student_id}`;
         const gradeValue = item.final_score ?? item.ai_score ?? "";
         const submittedFileName = item.file_name || `submission-${item.id}`;
         return `
@@ -2393,7 +2441,7 @@ async function openGradeAssignmentModal(courseId, assignmentId) {
 
     const fileButton = target.closest("[data-open-submission-file]");
     if (fileButton instanceof HTMLElement) {
-      const submissionId = Number(fileButton.getAttribute("data-open-submission-file"));
+      const submissionId = fileButton.getAttribute("data-open-submission-file");
       const fileName = fileButton.getAttribute("data-submission-file-name") || `submission-${submissionId}`;
       if (!submissionId) return;
 
@@ -2409,7 +2457,7 @@ async function openGradeAssignmentModal(courseId, assignmentId) {
     const button = target.closest("[data-save-grade]");
     if (!(button instanceof HTMLElement)) return;
 
-    const submissionId = Number(button.getAttribute("data-save-grade"));
+    const submissionId = button.getAttribute("data-save-grade");
     const scoreInput = modal.querySelector(`#grade-score-${submissionId}`);
     const commentInput = modal.querySelector(`#grade-comment-${submissionId}`);
     if (!(scoreInput instanceof HTMLInputElement) || !(commentInput instanceof HTMLTextAreaElement)) return;
@@ -2538,9 +2586,9 @@ function bindClassroomHandlers(course) {
     const target = event.target;
     if (!(target instanceof HTMLInputElement) || target.getAttribute("data-ai-note-id") === null) return;
 
-    const checkedIds = Array.from(document.querySelectorAll("#ai-material-list input[data-ai-note-id]:checked"))
-      .map((input) => Number(input.getAttribute("data-ai-note-id")))
-      .filter((value) => Number.isFinite(value) && value > 0);
+      const checkedIds = Array.from(document.querySelectorAll("#ai-material-list input[data-ai-note-id]:checked"))
+      .map((input) => input.getAttribute("data-ai-note-id"))
+      .filter((value) => value);
     setAiSelectedNotes(courseId, checkedIds);
     syncAiSelectionUi();
   });
@@ -2551,9 +2599,9 @@ function bindClassroomHandlers(course) {
       .map((input) => {
         if (!(input instanceof HTMLInputElement)) return null;
         input.checked = true;
-        return Number(input.getAttribute("data-ai-note-id"));
+        return input.getAttribute("data-ai-note-id");
       })
-      .filter((value) => Number.isFinite(value) && value > 0);
+      .filter((value) => value);
     setAiSelectedNotes(courseId, selected);
     syncAiSelectionUi();
   });
@@ -2690,7 +2738,7 @@ function bindClassroomHandlers(course) {
     if (!(button instanceof HTMLElement)) return;
 
     const type = button.getAttribute("data-classwork-open-type") || "";
-    const id = Number(button.getAttribute("data-classwork-open-id") || 0);
+    const id = button.getAttribute("data-classwork-open-id");
     if (!id || !["material", "assignment"].includes(type)) return;
 
     setClassworkView(courseId, "detail", type, id);
@@ -2708,7 +2756,7 @@ function bindClassroomHandlers(course) {
 
     const streamAssignmentButton = target.closest("[data-stream-open-assignment]");
     if (streamAssignmentButton instanceof HTMLElement) {
-      const assignmentId = Number(streamAssignmentButton.getAttribute("data-stream-open-assignment"));
+      const assignmentId = streamAssignmentButton.getAttribute("data-stream-open-assignment");
       if (!assignmentId) return;
       appState.currentTab = "classwork";
       setClassworkFilter(courseId, "assignments");
@@ -2720,7 +2768,7 @@ function bindClassroomHandlers(course) {
     const announcementOpenButton = target.closest("[data-announcement-open-type]");
     if (announcementOpenButton instanceof HTMLElement) {
       const type = announcementOpenButton.getAttribute("data-announcement-open-type") || "";
-      const targetId = Number(announcementOpenButton.getAttribute("data-announcement-open-id") || 0);
+      const targetId = announcementOpenButton.getAttribute("data-announcement-open-id");
       if (!targetId || !["assignment", "material"].includes(type)) return;
       appState.currentTab = "classwork";
       setClassworkFilter(courseId, type === "assignment" ? "assignments" : "materials");
@@ -2731,7 +2779,7 @@ function bindClassroomHandlers(course) {
 
     const gradesAssignmentButton = target.closest("[data-grade-open-assignment]");
     if (gradesAssignmentButton instanceof HTMLElement) {
-      const assignmentId = Number(gradesAssignmentButton.getAttribute("data-grade-open-assignment"));
+      const assignmentId = gradesAssignmentButton.getAttribute("data-grade-open-assignment");
       if (!assignmentId) return;
       appState.currentTab = "classwork";
       setClassworkFilter(courseId, "assignments");
@@ -2743,7 +2791,7 @@ function bindClassroomHandlers(course) {
     const kickButton = target.closest("[data-kick-student]");
     if (kickButton instanceof HTMLElement) {
       if (!owner) return;
-      const studentId = Number(kickButton.getAttribute("data-kick-student"));
+      const studentId = kickButton.getAttribute("data-kick-student");
       if (!studentId) return;
 
       const ok = window.confirm("Remove this student from the class?");
@@ -2763,8 +2811,8 @@ function bindClassroomHandlers(course) {
 
     const noteButton = target.closest("[data-note-download]");
     if (noteButton instanceof HTMLElement) {
-      const noteId = Number(noteButton.getAttribute("data-note-download"));
-      const note = (appState.notesByCourse[courseId] || []).find((item) => Number(item.id) === noteId);
+      const noteId = noteButton.getAttribute("data-note-download");
+      const note = (appState.notesByCourse[courseId] || []).find((item) => sameId(item.id, noteId));
       if (noteId && note) {
         try {
           await downloadProtectedFile(`/notes/download/${noteId}`, note.file_name || `${note.title}.pdf`);
@@ -2780,10 +2828,10 @@ function bindClassroomHandlers(course) {
     if (noteDeleteButton instanceof HTMLElement) {
       if (!owner) return;
 
-      const noteId = Number(noteDeleteButton.getAttribute("data-note-delete"));
+      const noteId = noteDeleteButton.getAttribute("data-note-delete");
       if (!noteId) return;
 
-      const note = (appState.notesByCourse[courseId] || []).find((item) => Number(item.id) === noteId);
+      const note = (appState.notesByCourse[courseId] || []).find((item) => sameId(item.id, noteId));
       const ok = await confirmAction({
         title: "Delete material",
         message: `Delete ${note?.title || "this material"} from the classroom? This cannot be undone.`,
@@ -2812,7 +2860,7 @@ function bindClassroomHandlers(course) {
 
     const attachButton = target.closest("[data-assignment-download]");
     if (attachButton instanceof HTMLElement) {
-      const attachmentId = Number(attachButton.getAttribute("data-assignment-download"));
+      const attachmentId = attachButton.getAttribute("data-assignment-download");
       const fileName = attachButton.getAttribute("data-assignment-file-name") || "attachment";
       if (!attachmentId) return;
       try {
@@ -2826,7 +2874,7 @@ function bindClassroomHandlers(course) {
 
     const mySubmissionButton = target.closest("[data-open-my-submission]");
     if (mySubmissionButton instanceof HTMLElement) {
-      const submissionId = Number(mySubmissionButton.getAttribute("data-open-my-submission"));
+      const submissionId = mySubmissionButton.getAttribute("data-open-my-submission");
       const fileName = mySubmissionButton.getAttribute("data-my-submission-file-name") || `submission-${submissionId}`;
       if (!submissionId) return;
       try {
@@ -2840,7 +2888,7 @@ function bindClassroomHandlers(course) {
 
     const unsubmitButton = target.closest("[data-unsubmit-assignment]");
     if (unsubmitButton instanceof HTMLElement) {
-      const assignmentId = Number(unsubmitButton.getAttribute("data-unsubmit-assignment"));
+      const assignmentId = unsubmitButton.getAttribute("data-unsubmit-assignment");
       if (!assignmentId) return;
       const ok = await confirmAction({
         title: "Unsubmit assignment",
@@ -2868,7 +2916,7 @@ function bindClassroomHandlers(course) {
     const endAssignmentButton = target.closest("[data-assignment-end]");
     if (endAssignmentButton instanceof HTMLElement) {
       if (!owner) return;
-      const assignmentId = Number(endAssignmentButton.getAttribute("data-assignment-end"));
+      const assignmentId = endAssignmentButton.getAttribute("data-assignment-end");
       if (!assignmentId) return;
 
       try {
@@ -2887,7 +2935,7 @@ function bindClassroomHandlers(course) {
     const deleteAssignmentButton = target.closest("[data-assignment-delete]");
     if (deleteAssignmentButton instanceof HTMLElement) {
       if (!owner) return;
-      const assignmentId = Number(deleteAssignmentButton.getAttribute("data-assignment-delete"));
+      const assignmentId = deleteAssignmentButton.getAttribute("data-assignment-delete");
       if (!assignmentId) return;
       const ok = window.confirm("Remove this assignment for the whole class?");
       if (!ok) return;
@@ -2908,10 +2956,9 @@ function bindClassroomHandlers(course) {
 
     const gradingButton = target.closest("[data-open-grading]");
     if (gradingButton instanceof HTMLElement) {
-      const assignmentId = Number(gradingButton.getAttribute("data-open-grading"));
-      if (assignmentId) {
-        await openGradeAssignmentModal(courseId, assignmentId);
-      }
+      const assignmentId = gradingButton.getAttribute("data-open-grading");
+      if (!assignmentId) return;
+      await openGradeAssignmentModal(courseId, assignmentId);
     }
   };
 
@@ -2920,20 +2967,30 @@ function bindClassroomHandlers(course) {
   document.getElementById("assignment-detail-attach-form")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const button = document.querySelector("[data-assignment-attach-id]");
-    const assignmentId = Number(button?.getAttribute("data-assignment-attach-id") || 0);
+    const assignmentId = button?.getAttribute("data-assignment-attach-id");
     const title = document.getElementById("assignment-detail-attach-title")?.value?.trim() || "";
     const files = Array.from(document.getElementById("assignment-detail-attach-file")?.files || []);
     if (!assignmentId || !files.length) return;
 
     try {
       for (const file of files) {
-        const formData = new FormData();
         const computedTitle = files.length === 1
           ? (title || file.name)
           : (title ? `${title} - ${file.name}` : file.name);
-        formData.append("title", computedTitle);
-        formData.append("file", file);
-        await apiCall(`/assignments/${assignmentId}/attachments`, "POST", formData);
+        const fileKey = await uploadDirectToR2(`/assignments/${assignmentId}/attachments/presign`, file);
+        if (fileKey) {
+          await apiCall(`/assignments/${assignmentId}/attachments/register`, "POST", {
+            file_key: fileKey,
+            file_name: file.name,
+            title: computedTitle,
+            mime_type: file.type || "application/octet-stream",
+          });
+        } else {
+          const formData = new FormData();
+          formData.append("title", computedTitle);
+          formData.append("file", file);
+          await apiCall(`/assignments/${assignmentId}/attachments`, "POST", formData);
+        }
       }
       appState.assignmentAttachmentsByAssignment[assignmentId] = await apiCall(`/assignments/${assignmentId}/attachments`, "GET").catch(() => []);
       addNotification(files.length > 1 ? "Assignment attachments added" : "Assignment attachment added");
@@ -2949,7 +3006,7 @@ function bindClassroomHandlers(course) {
     if (!owner) return;
 
     const button = document.querySelector("[data-assignment-update-due]");
-    const assignmentId = Number(button?.getAttribute("data-assignment-update-due") || 0);
+    const assignmentId = button?.getAttribute("data-assignment-update-due");
     const dueInput = document.getElementById("assignment-detail-due");
     if (!(dueInput instanceof HTMLInputElement) || !assignmentId) return;
 
@@ -2971,7 +3028,7 @@ function bindClassroomHandlers(course) {
       event.preventDefault();
       const form = event.target;
       if (!(form instanceof HTMLFormElement)) return;
-      const submissionId = Number(form.getAttribute("data-submission-id") || 0);
+      const submissionId = form.getAttribute("data-submission-id");
       const input = document.getElementById("assignment-private-comment-text");
       if (!(input instanceof HTMLTextAreaElement)) return;
       const content = input.value.trim();
@@ -2993,14 +3050,16 @@ function bindClassroomHandlers(course) {
     document.getElementById("assignment-detail-submit-form")?.addEventListener("submit", async (event) => {
       event.preventDefault();
       const button = document.querySelector("[data-assignment-submit-id]");
-      const assignmentId = Number(button?.getAttribute("data-assignment-submit-id") || 0);
+      const assignmentId = button?.getAttribute("data-assignment-submit-id");
       const file = document.getElementById("assignment-detail-submit-file")?.files?.[0];
       if (!assignmentId || !file) return;
 
       try {
         const formData = new FormData();
         formData.append("assignment_id", String(assignmentId));
-        formData.append("file", file);
+        const fileKey = await uploadDirectToR2(`/submissions/assignments/${assignmentId}/presign`, file);
+        if (fileKey) formData.append("file_key", fileKey);
+        else formData.append("file", file);
         const submission = await apiCall("/submissions", "POST", formData);
         const detail = await apiCall(`/submissions/${submission.id}`, "GET");
         appState.mySubmissionByAssignment[assignmentId] = detail;
@@ -3037,10 +3096,10 @@ async function renderClassroomPage(courseId, options = {}) {
     await loadCourses();
   }
 
-  let course = appState.courses.find((item) => Number(item.id) === Number(courseId));
+  let course = appState.courses.find((item) => sameId(item.id, courseId));
   if (!course && !forceRefresh) {
     await loadCourses();
-    course = appState.courses.find((item) => Number(item.id) === Number(courseId));
+    course = appState.courses.find((item) => sameId(item.id, courseId));
   }
 
   if (!course) {
@@ -3131,7 +3190,7 @@ async function renderTodoPage() {
 
   main.querySelectorAll("[data-open-from-todo]").forEach((button) => {
     button.addEventListener("click", () => {
-      const id = Number(button.getAttribute("data-open-from-todo"));
+      const id = button.getAttribute("data-open-from-todo");
       appState.currentCourseId = id;
       appState.currentTab = "classwork";
       setCourseQuery(id);
@@ -3169,7 +3228,7 @@ async function boot() {
   }
 
   const params = new URLSearchParams(window.location.search);
-  const courseId = Number(params.get("id") || 0);
+  const courseId = params.get("id");
 
   if (courseId) {
     appState.currentCourseId = courseId;

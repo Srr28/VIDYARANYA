@@ -17,6 +17,7 @@ from app.core.config import settings
 
 LOCAL_UPLOAD_BASE = Path("uploads")
 LOCAL_UPLOAD_BASE.mkdir(parents=True, exist_ok=True)
+MAX_UPLOAD_SIZE_BYTES = 10 * 1024 * 1024
 
 
 def sanitize_filename(filename: str) -> str:
@@ -142,6 +143,9 @@ class StorageService:
         """
         Upload bytes directly from backend server (used for migrations or fallback).
         """
+        if len(data) > MAX_UPLOAD_SIZE_BYTES:
+            raise ValueError("File exceeds the 10 MB upload limit")
+
         if self.is_r2_active:
             self._s3_client.put_object(
                 Bucket=self.bucket,
@@ -155,6 +159,27 @@ class StorageService:
             local_path.parent.mkdir(parents=True, exist_ok=True)
             local_path.write_bytes(data)
             return str(local_path)
+
+    def object_exists(self, key: str, max_size_bytes: int = MAX_UPLOAD_SIZE_BYTES) -> bool:
+        """Verify that an uploaded object exists and stays within the upload limit."""
+        if self.is_r2_active:
+            try:
+                metadata = self._s3_client.head_object(Bucket=self.bucket, Key=key)
+                size = int(metadata.get("ContentLength", 0))
+                if size > max_size_bytes:
+                    raise ValueError("File exceeds the 10 MB upload limit")
+                return True
+            except ClientError:
+                return False
+
+        path = Path(key)
+        if not path.is_file():
+            path = LOCAL_UPLOAD_BASE / key
+        if not path.is_file():
+            return False
+        if path.stat().st_size > max_size_bytes:
+            raise ValueError("File exceeds the 10 MB upload limit")
+        return True
 
     def download_file_bytes(self, key: str) -> bytes:
         """

@@ -193,6 +193,9 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
 
         db.commit()
         db.refresh(submission)
+        # Refresh assignment-level analytics after a submission becomes graded.
+        if submission.status == "graded":
+            await queue_service.enqueue_class_analytics(assignment.id)
         logger.info(
             "Successfully evaluated submission %s: status=%s, ai_score=%.2f, mastery=%s",
             submission_id,

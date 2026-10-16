@@ -1,10 +1,10 @@
 from datetime import datetime, timezone
 from pathlib import Path
 import uuid
-from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse, Response
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_db
@@ -16,12 +16,21 @@ from app.models.enrollment import Enrollment
 from app.models.submission import Submission
 from app.models.user import User
 from app.schemas.assignment import AssignmentCreate, AssignmentDueDateUpdate, AssignmentOut
+from app.services.storage_service import get_assignment_attachment_key, storage_service
 
 router = APIRouter(prefix="/assignments", tags=["assignments"])
 
-UPLOAD_DIR = Path("uploads") / "assignment_materials"
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
+class AssignmentAttachmentPresignRequest(BaseModel):
+    filename: str
+    content_type: str = "application/octet-stream"
+
+
+class AssignmentAttachmentRegisterRequest(BaseModel):
+    file_key: str
+    file_name: str
+    title: str = ""
+    mime_type: str = "application/octet-stream"
 
 def _is_course_member(db: Session, course_id: uuid.UUID, user_id: uuid.UUID) -> bool:
     enrollment = (
@@ -46,6 +55,15 @@ def _attachment_payload(item: AssignmentAttachment) -> dict:
         "file_name": item.file_name,
         "download_url": f"/assignments/attachments/{item.id}/download",
     }
+
+
+def _delete_stored_file(file_key: str) -> None:
+    """Delete an R2 object, while retaining support for legacy local files."""
+    local_path = Path(file_key)
+    if local_path.is_file():
+        local_path.unlink(missing_ok=True)
+        return
+    storage_service.delete_file(file_key)
 
 
 @router.post("", response_model=AssignmentOut)
@@ -167,14 +185,10 @@ def delete_assignment(
     submissions = db.query(Submission).filter(Submission.assignment_id == assignment_id).all()
 
     for item in attachments:
-        path = Path(item.file_path)
-        if path.exists():
-            path.unlink(missing_ok=True)
+        _delete_stored_file(item.file_path)
 
     for item in submissions:
-        path = Path(item.file_key)
-        if path.exists():
-            path.unlink(missing_ok=True)
+        _delete_stored_file(item.file_key)
 
     db.delete(assignment)
     db.commit()
@@ -199,16 +213,83 @@ def upload_assignment_attachment(
         raise HTTPException(status_code=403, detail="Only the classroom owner can upload attachments")
 
     original_name = Path(file.filename or "attachment").name
-    safe_name = f"{uuid4()}_{original_name}"
-    path = UPLOAD_DIR / safe_name
-    path.write_bytes(file.file.read())
+    file_key = get_assignment_attachment_key(str(course.id), str(assignment_id), original_name)
+    try:
+        storage_service.upload_bytes(
+            file_key,
+            file.file.read(),
+            content_type=file.content_type or "application/octet-stream",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
 
     item = AssignmentAttachment(
         assignment_id=assignment_id,
         title=(title.strip() or original_name)[:255],
         file_name=original_name[:255],
-        file_path=str(path),
+        file_path=file_key,
         mime_type=file.content_type,
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return _attachment_payload(item)
+
+
+@router.post("/{assignment_id}/attachments/presign")
+def presign_assignment_attachment(
+    assignment_id: uuid.UUID,
+    payload: AssignmentAttachmentPresignRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    assignment = db.query(Assignment).filter(Assignment.id == assignment_id).first()
+    if not assignment:
+        raise HTTPException(status_code=404, detail="Assignment not found")
+
+    course = db.query(Course).filter(Course.id == assignment.course_id).first()
+    if not course or course.faculty_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Only the classroom owner can upload attachments")
+
+    file_key = get_assignment_attachment_key(str(course.id), str(assignment_id), payload.filename)
+    return storage_service.generate_presigned_put_url(
+        key=file_key,
+        content_type=payload.content_type,
+    )
+
+
+@router.post("/{assignment_id}/attachments/register")
+def register_assignment_attachment(
+    assignment_id: uuid.UUID,
+    payload: AssignmentAttachmentRegisterRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    assignment = db.query(Assignment).filter(Assignment.id == assignment_id).first()
+    if not assignment:
+        raise HTTPException(status_code=404, detail="Assignment not found")
+
+    course = db.query(Course).filter(Course.id == assignment.course_id).first()
+    if not course or course.faculty_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Only the classroom owner can upload attachments")
+
+    expected_prefix = f"courses/{course.id}/assignments/{assignment_id}/"
+    if not payload.file_key.startswith(expected_prefix):
+        raise HTTPException(status_code=400, detail="Invalid assignment attachment key")
+    try:
+        exists = storage_service.object_exists(payload.file_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    if not exists:
+        raise HTTPException(status_code=400, detail="Uploaded attachment object was not found")
+
+    file_name = Path(payload.file_name or "attachment").name[:255]
+    item = AssignmentAttachment(
+        assignment_id=assignment_id,
+        title=(payload.title.strip() or file_name)[:255],
+        file_name=file_name,
+        file_path=payload.file_key,
+        mime_type=payload.mime_type,
     )
     db.add(item)
     db.commit()
@@ -244,7 +325,7 @@ def download_assignment_attachment(
     attachment_id: uuid.UUID,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> FileResponse:
+) -> Response:
     item = db.query(AssignmentAttachment).filter(AssignmentAttachment.id == attachment_id).first()
     if not item:
         raise HTTPException(status_code=404, detail="Attachment not found")
@@ -255,7 +336,21 @@ def download_assignment_attachment(
         raise HTTPException(status_code=403, detail="No access to this attachment")
 
     file_path = Path(item.file_path)
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="File not found")
+    if storage_service.is_r2_active and not file_path.is_file():
+        try:
+            content = storage_service.download_file_bytes(item.file_path)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="File not found") from exc
+        return Response(
+            content=content,
+            media_type=item.mime_type or "application/octet-stream",
+        )
+
+    if not file_path.is_file():
+        legacy_path = Path("uploads") / item.file_path
+        if legacy_path.is_file():
+            file_path = legacy_path
+        else:
+            raise HTTPException(status_code=404, detail="File not found")
 
     return FileResponse(path=file_path, filename=item.file_name, media_type=item.mime_type or "application/octet-stream")
