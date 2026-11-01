@@ -444,24 +444,33 @@ function showToast(message, isError = false) {
 }
 
 async function apiCall(endpoint, method = "GET", body = null) {
-  const headers = {};
-  if (token) headers.Authorization = `Bearer ${token}`;
-
   const isFormData = body instanceof FormData;
-  if (body && !isFormData) {
-    headers["Content-Type"] = "application/json";
-  }
-
-  const response = await fetch(`${API_URL}${endpoint}`, {
-    method,
-    headers,
-    body: body ? (isFormData ? body : JSON.stringify(body)) : null,
-  });
+  const send = () => {
+    const headers = {};
+    if (token) headers.Authorization = `Bearer ${token}`;
+    if (body && !isFormData) headers["Content-Type"] = "application/json";
+    return fetch(`${API_URL}${endpoint}`, {
+      method, headers, credentials: "include",
+      body: body ? (isFormData ? body : JSON.stringify(body)) : null,
+    });
+  };
+  let response = await send();
 
   if (response.status === 401) {
-    clearSession();
-    renderLoginPage();
-    throw new Error("Session expired");
+    if (!endpoint.startsWith("/auth/")) {
+      const refreshed = await fetch(`${API_URL}/auth/refresh`, { method: "POST", credentials: "include" });
+      if (refreshed.ok) {
+        const payload = await refreshed.json();
+        token = payload.access_token;
+        localStorage.setItem("token", token);
+        response = await send();
+      }
+    }
+    if (response.status === 401) {
+      clearSession();
+      renderLoginPage();
+      throw new Error("Session expired");
+    }
   }
 
   if (!response.ok) {
@@ -477,7 +486,17 @@ async function downloadProtectedFile(endpoint, fileName = "download") {
   const headers = {};
   if (token) headers.Authorization = `Bearer ${token}`;
 
-  const response = await fetch(`${API_URL}${endpoint}`, { method: "GET", headers });
+  let response = await fetch(`${API_URL}${endpoint}`, { method: "GET", headers, credentials: "include" });
+  if (response.status === 401) {
+    const refreshed = await fetch(`${API_URL}/auth/refresh`, { method: "POST", credentials: "include" });
+    if (refreshed.ok) {
+      const payload = await refreshed.json();
+      token = payload.access_token;
+      localStorage.setItem("token", token);
+      headers.Authorization = `Bearer ${token}`;
+      response = await fetch(`${API_URL}${endpoint}`, { method: "GET", headers, credentials: "include" });
+    }
+  }
   if (!response.ok) {
     throw new Error(`Download failed (${response.status})`);
   }
@@ -1108,8 +1127,9 @@ function bindTopMenus() {
     renderProfileSetup();
   });
 
-  document.getElementById("profile-logout")?.addEventListener("click", () => {
+  document.getElementById("profile-logout")?.addEventListener("click", async () => {
     closeMenus();
+    await fetch(`${API_URL}/auth/logout`, { method: "POST", credentials: "include" }).catch(() => {});
     clearSession();
     renderLoginPage();
   });
@@ -2503,13 +2523,15 @@ function renderClassroomAI(courseId) {
     : "General chat mode active";
 
   const chatRows = messages
-    .map((message) => {
+    .map((message, messageIndex) => {
       const userBubble = message.role === "user";
       const alignment = userBubble ? "items-end" : "items-start";
       const bubbleTone = userBubble
         ? "bg-blue-600 text-white"
         : "bg-white border border-slate-200 text-slate-800";
       const label = userBubble ? "You" : "AI Tutor";
+      const isStreamingAnswer = appState.aiLoadingByCourse[courseId]
+        && messageIndex === messages.length - 1 && !userBubble;
       const contentHtml = userBubble
         ? safe(message.content || "")
         : formatAiMessageContent(message.content || "");
@@ -2525,7 +2547,7 @@ function renderClassroomAI(courseId) {
       return `
         <div class="flex flex-col ${alignment}">
           <p class="text-[11px] uppercase tracking-wide text-slate-500 mb-1">${label}</p>
-          <div class="max-w-3xl rounded-2xl px-3.5 py-2.5 text-sm leading-6 break-words ${bubbleTone}">
+          <div ${isStreamingAnswer ? 'data-streaming-answer="true"' : ""} class="max-w-3xl rounded-2xl px-3.5 py-2.5 text-sm leading-6 break-words ${bubbleTone}">
             ${contentHtml}
           </div>
           ${sourceBadges}
@@ -3083,21 +3105,65 @@ function bindClassroomHandlers(course) {
     try {
       await renderClassroomPage(courseId);
 
-      const response = await apiCall("/chat", "POST", {
-        course_id: courseId,
-        message,
-        note_ids: selectedNoteIds,
+      const headers = { "Content-Type": "application/json", Accept: "text/event-stream" };
+      if (token) headers.Authorization = `Bearer ${token}`;
+      let response = await fetch(`${API_URL}/chat`, {
+        method: "POST", headers, credentials: "include",
+        body: JSON.stringify({ course_id: courseId, message, note_ids: selectedNoteIds }),
       });
-
-      const nextHistory = getAiMessages(courseId);
-      appState.aiMessagesByCourse[courseId] = [
-        ...nextHistory,
-        {
-          role: "assistant",
-          content: response?.answer || "I cannot answer that from the provided notes.",
-          sources: Array.isArray(response?.sources) ? response.sources : [],
-        },
-      ];
+      if (response.status === 401) {
+        const refreshed = await fetch(`${API_URL}/auth/refresh`, { method: "POST", credentials: "include" });
+        if (refreshed.ok) {
+          const payload = await refreshed.json();
+          token = payload.access_token;
+          localStorage.setItem("token", token);
+          headers.Authorization = `Bearer ${token}`;
+          response = await fetch(`${API_URL}/chat`, {
+            method: "POST", headers, credentials: "include",
+            body: JSON.stringify({ course_id: courseId, message, note_ids: selectedNoteIds }),
+          });
+        }
+      }
+      if (!response.ok || !response.body) throw new Error(`AI tutor request failed (${response.status})`);
+      appState.aiMessagesByCourse[courseId] = [...getAiMessages(courseId), { role: "assistant", content: "", sources: [] }];
+      await renderClassroomPage(courseId);
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let sources = [];
+      let assistantText = "";
+      while (true) {
+        const { value, done } = await reader.read();
+        buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+        const events = buffer.split("\n\n");
+        buffer = events.pop() || "";
+        for (const eventText of events) {
+          const eventName = eventText.match(/^event:\s*(.+)$/m)?.[1]?.trim();
+          const dataLine = eventText.match(/^data:\s*(.+)$/m)?.[1];
+          if (!dataLine) continue;
+          const data = JSON.parse(dataLine);
+          if (eventName === "token") {
+            assistantText += data.content || "";
+            const history = getAiMessages(courseId);
+            history[history.length - 1] = { role: "assistant", content: assistantText, sources };
+            appState.aiMessagesByCourse[courseId] = history;
+            const log = document.getElementById("ai-chat-log");
+            if (log) {
+              const bubble = log.querySelector("[data-streaming-answer]");
+              if (bubble) bubble.textContent = assistantText;
+              else { await renderClassroomPage(courseId); }
+            }
+          } else if (eventName === "metadata") {
+            sources = Array.isArray(data.sources) ? data.sources : [];
+            const history = getAiMessages(courseId);
+            history[history.length - 1] = { role: "assistant", content: assistantText, sources };
+            appState.aiMessagesByCourse[courseId] = history;
+          } else if (eventName === "error") {
+            throw new Error(data.detail || "AI tutor stream failed");
+          }
+        }
+        if (done) break;
+      }
     } catch (error) {
       const nextHistory = getAiMessages(courseId);
       appState.aiMessagesByCourse[courseId] = [

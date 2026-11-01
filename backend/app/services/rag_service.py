@@ -5,6 +5,7 @@ from uuid import uuid4
 
 import chromadb
 import requests
+import json
 try:
     from sentence_transformers import SentenceTransformer
 except Exception:
@@ -297,3 +298,64 @@ def chat(course_id: int | str, question: str, note_ids: list[int | str] | None =
             sources.append(source)
 
     return {"answer": answer, "sources": sources}
+
+
+def stream_chat(course_id: int | str, question: str, note_ids: list[int | str] | None = None):
+    """Yield Groq completion tokens followed by source metadata for SSE clients."""
+    selected_note_ids = sorted({str(note_id) for note_id in (note_ids or []) if note_id})
+    sources: list[str] = []
+    system_prompt = (
+        "You are Vidyaranya, a helpful AI tutor. Explain clearly and concisely. "
+        "Treat selected material as primary evidence and do not invent claims about it."
+    )
+    if selected_note_ids:
+        try:
+            collection = CHROMA_CLIENT.get_collection(name=f"course_{course_id}")
+            documents, metadatas = _query_selected_material_chunks(
+                collection, _encode_texts([question]), selected_note_ids
+            )
+            if not documents:
+                documents, metadatas = _fallback_selected_material_chunks(collection, selected_note_ids, question)
+            if documents:
+                system_prompt += "\nCourse material context:\n" + "\n\n".join(documents)
+                for meta in metadatas:
+                    source = meta.get("source", "note") if isinstance(meta, dict) else "note"
+                    if source not in sources:
+                        sources.append(source)
+        except Exception:
+            pass
+
+    api_key = (settings.GROQ_API_KEY or "").strip()
+    if api_key:
+        try:
+            with requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={"model": settings.GROQ_MODEL, "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": question},
+                ], "temperature": 0.2, "stream": True},
+                timeout=(10, 90), stream=True,
+            ) as response:
+                response.raise_for_status()
+                for line in response.iter_lines(decode_unicode=True):
+                    if not line or not line.startswith("data:"):
+                        continue
+                    raw = line[5:].strip()
+                    if raw == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(raw)
+                        content = chunk["choices"][0].get("delta", {}).get("content")
+                    except (ValueError, KeyError, IndexError, TypeError):
+                        continue
+                    if content:
+                        yield {"type": "token", "content": content}
+        except Exception:
+            yield {"type": "token", "content": "The AI tutor could not complete this response. Please try again."}
+    else:
+        fallback = chat(course_id, question, selected_note_ids)
+        for part in re.findall(r"\S+\s*", str(fallback.get("answer", ""))):
+            yield {"type": "token", "content": part}
+        sources = list(fallback.get("sources", []))
+    yield {"type": "sources", "sources": sources}

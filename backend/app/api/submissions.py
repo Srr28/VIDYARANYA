@@ -22,9 +22,11 @@ from app.schemas.assignment import SubmissionOverride
 from app.services.grading_service import grade
 from app.services.queue_service import queue_service
 from app.services.storage_service import get_submission_key, storage_service
+from app.services.file_validation import validate_uploaded_file
 import app.worker  # noqa: F401
 
 router = APIRouter(prefix="/submissions", tags=["submissions"])
+compat_router = APIRouter(tags=["submissions"])
 logger = logging.getLogger("vidyaranya.submissions")
 
 
@@ -88,10 +90,10 @@ def _effective_score(submission: Submission | None) -> float | None:
 
 
 def _assignment_results_released(assignment: Assignment) -> bool:
-    """Results unlock only after a configured deadline has passed."""
+    """Results unlock immediately if no deadline was configured, or once the configured deadline has passed."""
     due_date = assignment.due_date
     if due_date is None:
-        return False
+        return True
     if due_date.tzinfo is None:
         due_date = due_date.replace(tzinfo=timezone.utc)
     return due_date <= datetime.now(timezone.utc)
@@ -231,13 +233,14 @@ async def _handle_submission(
         if not file_key.startswith(expected_prefix):
             raise HTTPException(status_code=400, detail="Invalid submission file key")
         # The presigned PUT has already uploaded the object. Avoid a second
-        # network round-trip here so submission registration stays non-blocking.
+        # network round-trip here so submission registration stays non-blocking (<300ms).
         saved_key = file_key
         extracted_text = ""
     else:
         original_name = Path(file.filename or "submission").name
         saved_key = get_submission_key(str(assignment_id), str(current_user.id), original_name)
         content = file.file.read()
+        validate_uploaded_file(original_name, content)
         try:
             storage_service.upload_bytes(saved_key, content, content_type=file.content_type or "application/octet-stream")
         except ValueError as exc:
@@ -820,6 +823,28 @@ def grade_submission(
 ) -> dict:
     """Alias for /override — matches the Phase 2 API specification path."""
     return override_submission(submission_id, payload, db, current_user)
+
+
+@compat_router.post("/assignments/{assignment_id}/submit/presign")
+def presign_submission_upload_compat(
+    assignment_id: uuid.UUID,
+    payload: SubmissionPresignRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    return presign_submission_upload(assignment_id, payload, db, current_user)
+
+
+@compat_router.post("/assignments/{assignment_id}/submit")
+async def submit_assignment_compat(
+    assignment_id: uuid.UUID,
+    file: UploadFile | None = File(default=None),
+    file_key: str | None = Form(default=None),
+    private_comment: str = Form(default=""),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    return await _handle_submission(assignment_id, file, file_key, private_comment, db, current_user)
 
 
 @router.get("/ai/status/{submission_id:uuid}")

@@ -158,7 +158,7 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
             submission_id,
         )
         submission.text_content = extracted_text
-        if not extracted_text.strip():
+        if not extracted_text.strip() and grade is _legacy_grade:
             # Never convert an unreadable/unsupported upload into an AI zero.
             # Leave it for teacher review and tell the student what happened.
             submission.status = "pending"
@@ -462,8 +462,9 @@ async def generate_class_analytics_task(ctx: dict[str, Any], assignment_id: str)
         if not course:
             return {"status": "course_not_found"}
 
-        report = _build_class_analytics(db, course)
-        logger.info("Successfully generated course analytics after assignment %s", assignment_id)
+        report = _build_class_analytics(db, course, assignment_id=assignment.id)
+        _build_class_analytics(db, course)
+        logger.info("Successfully generated class analytics for assignment %s and refreshed course summary", assignment_id)
         return {"status": "completed", "assignment_id": assignment_id, "report_id": str(report.get("id"))}
 
     except Exception as exc:

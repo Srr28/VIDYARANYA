@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     SECRET_KEY: str = "development_secret_key_minimum_32_characters_long_12345"
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 120
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 30
     FRONTEND_URL: str = "http://localhost"
     FRONTEND_ALLOWED_HOSTS: list[str] = ["localhost", "127.0.0.1"]
     ENABLE_DEV_LOGIN: bool = True
@@ -93,6 +94,13 @@ class Settings(BaseSettings):
     def validate_access_token_expiry(cls, value: int) -> int:
         if value < 5 or value > 30 * 24 * 60:
             raise ValueError("ACCESS_TOKEN_EXPIRE_MINUTES must be between 5 and 43200")
+        return value
+
+    @field_validator("REFRESH_TOKEN_EXPIRE_DAYS")
+    @classmethod
+    def validate_refresh_token_expiry(cls, value: int) -> int:
+        if value < 1 or value > 365:
+            raise ValueError("REFRESH_TOKEN_EXPIRE_DAYS must be between 1 and 365")
         return value
 
     @field_validator("FRONTEND_URL")

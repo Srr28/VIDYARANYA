@@ -8,6 +8,7 @@ from app.models.course import Course
 from app.models.enrollment import Enrollment
 from app.models.note import Note
 from app.models.progress_report import ProgressReport
+from app.models.refresh_token import RefreshToken
 from app.models.submission import Submission
 from app.models.submission_comment import SubmissionComment
 from app.models.submission_text import SubmissionText
@@ -28,4 +29,5 @@ __all__ = [
     "ChatMessage",
     "AnalyticsReport",
     "ProgressReport",
+    "RefreshToken",
 ]

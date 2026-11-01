@@ -466,3 +466,18 @@ DROP POLICY IF EXISTS chat_history_insert_policy ON chat_history;
 CREATE POLICY chat_history_insert_policy ON chat_history FOR INSERT WITH CHECK (
     auth.uid() IS NULL OR auth.role() = 'service_role' OR user_id = auth.uid()
 );
+
+-- Phase 6 refresh sessions. Refresh tokens are hashed by the API and are not
+-- directly accessible to browser clients.
+CREATE TABLE IF NOT EXISTS refresh_tokens (
+    id UUID PRIMARY KEY,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    jti VARCHAR(64) NOT NULL UNIQUE,
+    token_hash VARCHAR(64) NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    revoked_at TIMESTAMPTZ NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_refresh_tokens_user_id ON refresh_tokens(user_id);
+CREATE INDEX IF NOT EXISTS ix_refresh_tokens_jti ON refresh_tokens(jti);
+ALTER TABLE refresh_tokens ENABLE ROW LEVEL SECURITY;

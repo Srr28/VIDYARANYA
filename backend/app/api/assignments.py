@@ -24,9 +24,11 @@ from app.schemas.assignment import (
     AssignmentReferenceUpdate,
 )
 from app.services.storage_service import get_assignment_attachment_key, storage_service
+from app.services.file_validation import validate_uploaded_file
 from app.services.queue_service import queue_service
 
 router = APIRouter(prefix="/assignments", tags=["assignments"])
+compat_router = APIRouter(tags=["assignments"])
 
 
 class AssignmentAttachmentPresignRequest(BaseModel):
@@ -117,6 +119,18 @@ def create_assignment(
     db.commit()
     db.refresh(assignment)
     return assignment
+
+
+@compat_router.post("/courses/{course_id}/assignments", response_model=AssignmentOut)
+def create_assignment_for_course(
+    course_id: uuid.UUID,
+    payload: AssignmentCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Assignment:
+    if payload.course_id != course_id:
+        raise HTTPException(status_code=400, detail="Course ID in path and request body do not match")
+    return create_assignment(payload, db, current_user)
 
 
 def _require_assignment_owner(assignment_id: uuid.UUID, db: Session, current_user: User) -> Assignment:
@@ -303,10 +317,12 @@ def upload_assignment_attachment(
 
     original_name = Path(file.filename or "attachment").name
     file_key = get_assignment_attachment_key(str(course.id), str(assignment_id), original_name)
+    content = file.file.read()
+    validate_uploaded_file(original_name, content)
     try:
         storage_service.upload_bytes(
             file_key,
-            file.file.read(),
+            content,
             content_type=file.content_type or "application/octet-stream",
         )
     except ValueError as exc:
@@ -371,6 +387,11 @@ def register_assignment_attachment(
         raise HTTPException(status_code=413, detail=str(exc)) from exc
     if not exists:
         raise HTTPException(status_code=400, detail="Uploaded attachment object was not found")
+
+    try:
+        validate_uploaded_file(payload.file_name, storage_service.download_file_bytes(payload.file_key))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=400, detail="Uploaded attachment object was not found") from exc
 
     file_name = Path(payload.file_name or "attachment").name[:255]
     item = AssignmentAttachment(

@@ -11,11 +11,12 @@ Provides:
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import func as sa_func
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_db
+from app.core.rate_limit import limiter
 from app.models.analytics_report import AnalyticsReport
 from app.models.assignment import Assignment
 from app.models.course import Course
@@ -283,7 +284,9 @@ def _report_payload(report: AnalyticsReport) -> dict:
 
 
 @router.get("/courses/{course_id}/analytics")
+@limiter.limit("10/minute")
 def get_course_analytics(
+    request: Request,
     course_id: uuid.UUID,
     refresh: bool = False,
     db: Session = Depends(get_db),
@@ -319,7 +322,9 @@ def get_course_analytics(
 
 
 @router.get("/courses/{course_id}/analytics/assignments/{assignment_id}")
+@limiter.limit("10/minute")
 def get_assignment_analytics(
+    request: Request,
     course_id: uuid.UUID,
     assignment_id: uuid.UUID,
     refresh: bool = False,
@@ -361,7 +366,10 @@ def get_assignment_analytics(
 
 
 @router.post("/progress-reports")
+@router.post("/progress-report")
+@limiter.limit("10/minute")
 def generate_progress_report(
+    request: Request,
     course_id: uuid.UUID,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -383,6 +391,7 @@ def generate_progress_report(
 
 
 @router.get("/progress-reports/{course_id}")
+@router.get("/progress-report/{course_id}")
 def get_progress_report(
     course_id: uuid.UUID,
     db: Session = Depends(get_db),
@@ -439,7 +448,6 @@ def _compute_and_save_progress_report(
         .order_by(Assignment.due_date.asc(), Assignment.id.asc())
         .all()
     )
-    assignments = [assignment for assignment in assignments if _assignment_deadline_passed(assignment)]
     assignment_ids = [a.id for a in assignments]
 
     submissions = (
@@ -452,46 +460,12 @@ def _compute_and_save_progress_report(
         .order_by(Submission.created_at.asc())
         .all()
     ) if assignment_ids else []
-    all_student_submissions = (
-        db.query(Submission)
-        .filter(
-            Submission.assignment_id.in_(assignment_ids),
-            Submission.student_id == student.id,
-        )
-        .all()
-    ) if assignment_ids else []
 
     # Build mastery snapshot per topic across all graded submissions
     topic_scores: dict[str, list[float]] = {}
     trajectory: list[dict] = []
 
-    submissions_by_assignment = {sub.assignment_id: sub for sub in all_student_submissions}
-    for assignment in assignments:
-        sub = submissions_by_assignment.get(assignment.id)
-        if sub is None:
-            trajectory.append(
-                {
-                    "assignment_id": str(assignment.id),
-                    "assignment_title": assignment.title,
-                    "score_pct": 0.0,
-                    "mastery_level": "No submission",
-                    "status": "missing",
-                    "submitted_at": None,
-                }
-            )
-            continue
-        if sub.status != "graded":
-            trajectory.append(
-                {
-                    "assignment_id": str(assignment.id),
-                    "assignment_title": assignment.title,
-                    "score_pct": None,
-                    "mastery_level": "Under review" if sub.status == "flagged" else "Evaluation in progress",
-                    "status": sub.status,
-                    "submitted_at": sub.created_at.isoformat() if sub.created_at else None,
-                }
-            )
-            continue
+    for sub in submissions:
         assignment = next((a for a in assignments if a.id == sub.assignment_id), None)
         max_marks = float(assignment.max_marks) if assignment and assignment.max_marks else 100.0
         eff = float(sub.final_score if sub.final_score is not None else (sub.ai_score or 0.0))

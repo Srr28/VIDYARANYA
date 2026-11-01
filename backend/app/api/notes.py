@@ -17,9 +17,11 @@ from app.models.user import User
 from app.services.queue_service import queue_service
 from app.services.rag_service import delete_note_chunks
 from app.services.storage_service import get_note_key, storage_service
+from app.services.file_validation import validate_uploaded_file
 import app.worker  # noqa: F401
 
 router = APIRouter(prefix="/notes", tags=["notes"])
+compat_router = APIRouter(tags=["notes"])
 logger = logging.getLogger("vidyaranya.notes")
 
 
@@ -69,6 +71,7 @@ def _note_payload(note: Note) -> dict:
 
 
 @router.post("/courses/{course_id}/presign")
+@compat_router.post("/courses/{course_id}/notes/presign")
 def presign_note_upload(
     course_id: uuid.UUID,
     payload: NotePresignRequest,
@@ -114,13 +117,22 @@ async def upload_note(
             raise HTTPException(status_code=413, detail=str(exc)) from exc
         if not exists:
             raise HTTPException(status_code=400, detail="Uploaded note object was not found")
+        try:
+            content = storage_service.download_file_bytes(saved_key)
+            validate_uploaded_file(Path(saved_key).name, content)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=400, detail="Uploaded note object was not found") from exc
         extracted_text = ""
     else:
         original_name = Path(file.filename or "note").name
         file_extension = Path(original_name).suffix.lstrip(".").lower()
         saved_key = get_note_key(str(course_id), original_name)
         content = file.file.read()
-        storage_service.upload_bytes(saved_key, content, content_type=file.content_type or "application/octet-stream")
+        validate_uploaded_file(original_name, content)
+        try:
+            storage_service.upload_bytes(saved_key, content, content_type=file.content_type or "application/octet-stream")
+        except ValueError as exc:
+            raise HTTPException(status_code=413, detail=str(exc)) from exc
         extracted_text = ""
 
     note = Note(

@@ -3,12 +3,16 @@ import uuid
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 
 from app import models  # noqa: F401
 from app.api import analytics, announcements, assignments, auth, chat, courses, notes, submissions, users
 from app.api.deps import get_current_user, get_db
 from app.core.config import settings
 from app.core.database import Base, engine
+from app.core.rate_limit import limiter
 from app.db.phase4_schema import ensure_submission_depth_columns
 from app.models.assignment import Assignment
 from app.models.course import Course
@@ -18,6 +22,9 @@ from app.services.queue_service import queue_service
 import app.worker  # noqa: F401
 
 app = FastAPI(title="Vidyaranya Backend")
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
@@ -67,8 +74,11 @@ app.include_router(auth.router)
 app.include_router(courses.router)
 app.include_router(announcements.router)
 app.include_router(notes.router)
+app.include_router(notes.compat_router)
 app.include_router(assignments.router)
+app.include_router(assignments.compat_router)
 app.include_router(submissions.router)
+app.include_router(submissions.compat_router)
 app.include_router(ai_router)
 app.include_router(chat.router)
 app.include_router(users.router)
