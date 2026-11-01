@@ -44,7 +44,7 @@ def normalize_text(text: str) -> str:
 def _extract_pdf_fitz(doc) -> str:
     """
     Extract text page-by-page using PyMuPDF.
-    If a page has fewer than 50 words, fallback to high-DPI Tesseract OCR for that page.
+    OCR sparse pages and preserve existing PDF text when both extraction paths find content.
     """
     page_texts: list[str] = []
 
@@ -53,14 +53,21 @@ def _extract_pdf_fitz(doc) -> str:
         raw_text = page.get_text("text") or ""
         words = raw_text.split()
 
-        # If word count is low (< 50 words), page is likely a scanned sheet or image
+        # Use OCR for scanned/sparse pages, but don't discard PDF text already
+        # extracted successfully. Mixed pages can contain digital text plus
+        # diagrams or equations that OCR may only partially recognize.
         if len(words) < 50:
             try:
                 pix = page.get_pixmap(dpi=300)
                 img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
                 ocr_text = pytesseract.image_to_string(img, lang="eng").strip()
-                if ocr_text:
+                ocr_words = ocr_text.split()
+                if not words and ocr_words:
                     page_texts.append(ocr_text)
+                elif len(words) < 50 and len(ocr_words) > max(60, int(len(words) * 1.5)):
+                    # Sparse PDF text may only be a header while the main page
+                    # is scanned. Keep both sources so OCR cannot erase text.
+                    page_texts.append(f"{raw_text.strip()}\n\n{ocr_text}".strip())
                 else:
                     page_texts.append(raw_text)
             except Exception:

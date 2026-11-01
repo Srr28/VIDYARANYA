@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from pathlib import Path
+from datetime import datetime, timezone
 import uuid
 from uuid import uuid4
 
@@ -86,6 +87,38 @@ def _effective_score(submission: Submission | None) -> float | None:
     return float(submission.final_score if submission.final_score is not None else (submission.ai_score or 0.0))
 
 
+def _assignment_results_released(assignment: Assignment) -> bool:
+    """Results unlock only after a configured deadline has passed."""
+    due_date = assignment.due_date
+    if due_date is None:
+        return False
+    if due_date.tzinfo is None:
+        due_date = due_date.replace(tzinfo=timezone.utc)
+    return due_date <= datetime.now(timezone.utc)
+
+
+def _submission_deadline_passed(assignment: Assignment) -> bool:
+    """Assignments without a due date remain open; a configured deadline is inclusive."""
+    due_date = assignment.due_date
+    if due_date is None:
+        return False
+    if due_date.tzinfo is None:
+        due_date = due_date.replace(tzinfo=timezone.utc)
+    return due_date <= datetime.now(timezone.utc)
+
+
+def _results_released_to_user(assignment: Assignment, course: Course, user: User) -> bool:
+    return course.faculty_id == user.id or _assignment_results_released(assignment)
+
+
+def _student_visible_status(submission: Submission | None, results_released: bool) -> str:
+    if submission is None:
+        return "missing"
+    if not results_released and submission.status in {"graded", "flagged"}:
+        return "awaiting_release"
+    return submission.status
+
+
 def _can_access_course(current_user: User, course: Course, db: Session) -> bool:
     if course.faculty_id == current_user.id:
         return True
@@ -124,6 +157,8 @@ def presign_submission_upload(
 
     if not _is_enrolled(db, assignment.course_id, current_user.id):
         raise HTTPException(status_code=403, detail="You are not enrolled in this course")
+    if _submission_deadline_passed(assignment):
+        raise HTTPException(status_code=403, detail="The submission deadline has passed")
 
     key = get_submission_key(str(assignment_id), str(current_user.id), payload.filename)
     return storage_service.generate_presigned_put_url(
@@ -185,6 +220,8 @@ async def _handle_submission(
 
     if not _is_enrolled(db, assignment.course_id, current_user.id):
         raise HTTPException(status_code=403, detail="You are not enrolled in this course")
+    if _submission_deadline_passed(assignment):
+        raise HTTPException(status_code=403, detail="The submission deadline has passed")
 
     if not file and not file_key:
         raise HTTPException(status_code=400, detail="Either file or file_key must be provided")
@@ -225,6 +262,8 @@ async def _handle_submission(
             status="pending_eval",
             ai_score=None,
             mastery_level=None,
+            depth_score=None,
+            depth_label=None,
             topic_scores=None,
             feedback_text=None,
             integrity_score=None,
@@ -240,6 +279,8 @@ async def _handle_submission(
         submission.status = "pending_eval"
         submission.ai_score = None
         submission.mastery_level = None
+        submission.depth_score = None
+        submission.depth_label = None
         submission.topic_scores = None
         submission.feedback_text = None
         submission.final_score = None
@@ -303,24 +344,29 @@ def get_submission(
     if not _can_access_submission(current_user, course, submission):
         raise HTTPException(status_code=403, detail="No access")
 
-    return {
+    results_released = _results_released_to_user(assignment, course, current_user)
+    result = {
         "id": submission.id,
         "assignment_id": submission.assignment_id,
         "student_id": submission.student_id,
-        "status": submission.status,
+        "status": _student_visible_status(submission, results_released),
+        "results_released": results_released,
         "file_name": _submitted_file_name(submission),
-        "ai_score": submission.ai_score,
-        "ai_feedback": submission.ai_feedback,
-        "mastery_level": submission.mastery_level,
-        "topic_scores": submission.topic_scores,
-        "feedback_text": submission.feedback_text,
-        "integrity_score": submission.integrity_score,
-        "plagiarism_flag": submission.plagiarism_flag,
-        "final_score": submission.final_score,
-        "effective_score": _effective_score(submission),
-        "teacher_comment": submission.faculty_note,
-        "faculty_note": submission.faculty_note,
+        "ai_score": submission.ai_score if results_released else None,
+        "ai_feedback": submission.ai_feedback if results_released else None,
+        "mastery_level": submission.mastery_level if results_released else None,
+        "depth_score": submission.depth_score if results_released else None,
+        "depth_label": submission.depth_label if results_released else None,
+        "topic_scores": submission.topic_scores if results_released else None,
+        "feedback_text": submission.feedback_text if results_released else None,
+        "integrity_score": submission.integrity_score if results_released else None,
+        "plagiarism_flag": submission.plagiarism_flag if results_released else False,
+        "final_score": submission.final_score if results_released else None,
+        "effective_score": _effective_score(submission) if results_released else None,
+        "teacher_comment": submission.faculty_note if results_released else None,
+        "faculty_note": submission.faculty_note if results_released else None,
     }
+    return result
 
 
 @router.get("/by-assignment/{assignment_id}/mine")
@@ -348,21 +394,26 @@ def get_my_submission_for_assignment(
     if submission is None:
         return {"assignment_id": assignment.id, "submission": None}
 
+    results_released = _results_released_to_user(assignment, course, current_user)
     return {
         "assignment_id": assignment.id,
+        "results_released": results_released,
         "submission": {
             "id": submission.id,
             "assignment_id": submission.assignment_id,
             "student_id": submission.student_id,
-            "status": submission.status,
+            "status": _student_visible_status(submission, results_released),
             "file_name": _submitted_file_name(submission),
-            "ai_score": submission.ai_score,
-            "final_score": submission.final_score,
-            "effective_score": _effective_score(submission),
-            "mastery_level": submission.mastery_level,
-            "topic_scores": submission.topic_scores,
-            "feedback_text": submission.feedback_text,
-            "teacher_comment": submission.faculty_note,
+            "results_released": results_released,
+            "ai_score": submission.ai_score if results_released else None,
+            "final_score": submission.final_score if results_released else None,
+            "effective_score": _effective_score(submission) if results_released else None,
+            "mastery_level": submission.mastery_level if results_released else None,
+            "depth_score": submission.depth_score if results_released else None,
+            "depth_label": submission.depth_label if results_released else None,
+            "topic_scores": submission.topic_scores if results_released else None,
+            "feedback_text": submission.feedback_text if results_released else None,
+            "teacher_comment": submission.faculty_note if results_released else None,
             "created_at": submission.created_at,
         },
     }
@@ -381,6 +432,8 @@ def unsubmit_my_assignment(
 
     if not _is_enrolled(db, course.id, current_user.id):
         raise HTTPException(status_code=403, detail="No access")
+    if _submission_deadline_passed(assignment):
+        raise HTTPException(status_code=403, detail="The submission deadline has passed; submissions can no longer be changed")
 
     submission = (
         db.query(Submission)
@@ -472,6 +525,8 @@ def list_submissions_for_assignment(
                 "final_score": item.final_score,
                 "effective_score": _effective_score(item),
                 "mastery_level": item.mastery_level,
+                "depth_score": item.depth_score,
+                "depth_label": item.depth_label,
                 "topic_scores": item.topic_scores,
                 "feedback_text": item.feedback_text,
                 "integrity_score": item.integrity_score,
@@ -604,26 +659,42 @@ def my_grades_by_course(
     items = []
     total_effective = 0.0
     graded_count = 0
+    published_count = 0
 
     for assignment in ordered:
         submission = submission_map.get(assignment.id)
-        effective = _effective_score(submission)
-        if effective is not None:
-            total_effective += effective
+        results_released = _results_released_to_user(assignment, course, current_user)
+        if results_released:
+            published_count += 1
+        is_graded = bool(results_released and submission and submission.status == "graded")
+        effective = (
+            _effective_score(submission) if is_graded
+            else 0.0 if results_released and submission is None
+            else None
+        )
+        if is_graded:
+            total_effective += effective or 0.0
             graded_count += 1
         items.append(
             {
                 "assignment_id": assignment.id,
                 "title": assignment.title,
                 "due_date": assignment.due_date,
+                "results_released": results_released,
                 "max_score": assignment.max_marks,
                 "submission_id": submission.id if submission else None,
-                "status": submission.status if submission else "missing",
-                "ai_score": submission.ai_score if submission else None,
-                "final_score": submission.final_score if submission else None,
+                "status": _student_visible_status(submission, results_released),
+                "ai_score": submission.ai_score if submission and results_released else None,
+                "final_score": submission.final_score if submission and results_released else None,
                 "effective_score": effective,
-                "mastery_level": submission.mastery_level if submission else None,
-                "teacher_comment": submission.faculty_note if submission else None,
+                "mastery_level": submission.mastery_level if submission and results_released else None,
+                "depth_score": submission.depth_score if submission and results_released else None,
+                "depth_label": submission.depth_label if submission and results_released else None,
+                "topic_scores": submission.topic_scores if submission and results_released else None,
+                "feedback_text": submission.feedback_text if submission and results_released else None,
+                "integrity_score": submission.integrity_score if submission and results_released else None,
+                "plagiarism_flag": submission.plagiarism_flag if submission and results_released else False,
+                "teacher_comment": submission.faculty_note if submission and results_released else None,
             }
         )
 
@@ -631,9 +702,9 @@ def my_grades_by_course(
         "course_id": course_id,
         "is_owner": course.faculty_id == current_user.id,
         "summary": {
-            "assignments_total": len(assignments),
+            "assignments_total": published_count,
             "graded_count": graded_count,
-            "average_score": (round(total_effective / graded_count, 2) if graded_count else None),
+            "average_score": (round(total_effective / published_count, 2) if published_count else None),
         },
         "items": items,
     }
@@ -656,7 +727,8 @@ def leaderboard_by_course(
         .all()
     )
     assignments = db.query(Assignment).filter(Assignment.course_id == course_id).all()
-    assignment_ids = [item.id for item in assignments]
+    published_assignments = [item for item in assignments if _assignment_results_released(item)]
+    assignment_ids = [item.id for item in published_assignments]
 
     submissions = (
         db.query(Submission)
@@ -671,15 +743,25 @@ def leaderboard_by_course(
     rows = []
     for student in students:
         student_submissions = by_student.get(student.id, [])
-        scores = [_effective_score(item) for item in student_submissions]
-        valid_scores = [score for score in scores if score is not None]
-        average = round(sum(valid_scores) / len(valid_scores), 2) if valid_scores else 0.0
+        submission_map = {item.assignment_id: item for item in student_submissions}
+        scores = []
+        graded_count = 0
+        for assignment in published_assignments:
+            item = submission_map.get(assignment.id)
+            if item and item.status == "graded":
+                scores.append(_effective_score(item) or 0.0)
+                graded_count += 1
+            else:
+                # Missing, still-processing, and flagged submissions contribute zero
+                # once the assignment deadline closes.
+                scores.append(0.0)
+        average = round(sum(scores) / len(published_assignments), 2) if published_assignments else 0.0
         rows.append(
             {
                 "student_id": student.id,
                 "student_name": student.name,
-                "submissions_count": len(student_submissions),
-                "graded_count": len(valid_scores),
+                "submissions_count": sum(1 for item in student_submissions if item.assignment_id in assignment_ids),
+                "graded_count": graded_count,
                 "average_score": average,
             }
         )
@@ -690,8 +772,9 @@ def leaderboard_by_course(
 
     return {
         "course_id": course_id,
-        "assignments_total": len(assignments),
-        "rows": rows,
+        "assignments_total": len(published_assignments),
+        "pending_assignments_count": len(assignments) - len(published_assignments),
+        "rows": rows if published_assignments else [],
     }
 
 
@@ -721,6 +804,8 @@ def override_submission(
         "id": submission.id,
         "status": submission.status,
         "final_score": submission.final_score,
+        "depth_score": submission.depth_score,
+        "depth_label": submission.depth_label,
         "teacher_comment": submission.faculty_note,
         "faculty_note": submission.faculty_note,
     }
@@ -757,10 +842,14 @@ def get_ai_evaluation_status(
     if not _can_access_submission(current_user, course, submission):
         raise HTTPException(status_code=403, detail="No access")
 
+    results_released = _results_released_to_user(assignment, course, current_user)
     result: dict = {
         "submission_id": str(submission.id),
-        "status": submission.status,
+        "status": _student_visible_status(submission, results_released),
+        "results_released": results_released,
     }
+    if not results_released:
+        return result
     if submission.status == "graded":
         result.update(
             {
@@ -768,6 +857,8 @@ def get_ai_evaluation_status(
                 "final_score": submission.final_score,
                 "effective_score": _effective_score(submission),
                 "mastery_level": submission.mastery_level,
+                "depth_score": submission.depth_score,
+                "depth_label": submission.depth_label,
                 "topic_scores": submission.topic_scores,
                 "feedback_text": submission.feedback_text,
                 "integrity_score": submission.integrity_score,

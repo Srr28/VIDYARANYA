@@ -61,6 +61,15 @@ def _can_access_course(db: Session, course: Course, user: User) -> bool:
     return _is_enrolled(db, course.id, user.id)
 
 
+def _assignment_deadline_passed(assignment: Assignment) -> bool:
+    due_date = assignment.due_date
+    if due_date is None:
+        return False
+    if due_date.tzinfo is None:
+        due_date = due_date.replace(tzinfo=timezone.utc)
+    return due_date <= datetime.now(timezone.utc)
+
+
 def _grade_letter(pct: float) -> str:
     if pct >= 80:
         return "A"
@@ -230,6 +239,8 @@ def get_course_analytics(
     course = _get_course_or_404(db, course_id)
     if not _can_access_course(db, course, current_user):
         raise HTTPException(status_code=403, detail="No access to this course")
+    if current_user.id != course.faculty_id:
+        raise HTTPException(status_code=403, detail="Class analytics are available to the teacher only")
 
     # If not refreshing, return the latest cached report if available
     if not refresh:
@@ -268,6 +279,8 @@ def get_assignment_analytics(
     assignment = _get_assignment_or_404(db, assignment_id)
     if assignment.course_id != course_id:
         raise HTTPException(status_code=404, detail="Assignment not found in this course")
+    if current_user.id != course.faculty_id and not _assignment_deadline_passed(assignment):
+        return {"status": "awaiting_release", "assignment_id": str(assignment_id)}
 
     if not refresh:
         cached = (
@@ -325,6 +338,10 @@ def get_progress_report(
     if not _can_access_course(db, course, current_user):
         raise HTTPException(status_code=403, detail="No access to this course")
 
+    if current_user.id != course.faculty_id:
+        # Recompute for students so cached reports cannot reveal pre-deadline grades.
+        return _compute_and_save_progress_report(db, course, current_user)
+
     report = (
         db.query(ProgressReport)
         .filter(
@@ -350,6 +367,7 @@ def _compute_and_save_progress_report(
     assignments = (
         db.query(Assignment).filter(Assignment.course_id == course.id).all()
     )
+    assignments = [assignment for assignment in assignments if _assignment_deadline_passed(assignment)]
     assignment_ids = [a.id for a in assignments]
 
     submissions = (
@@ -409,19 +427,26 @@ def _compute_and_save_progress_report(
             .filter(
                 Submission.assignment_id.in_(assignment_ids),
                 Submission.student_id == sid,
-                Submission.status == "graded",
             )
             .all()
         ) if assignment_ids else []
-        if not subs:
+        if not assignments:
             return 0.0
+        by_assignment = {submission.assignment_id: submission for submission in subs}
         scores = []
-        for s in subs:
-            a = next((x for x in assignments if x.id == s.assignment_id), None)
-            mx = float(a.max_marks) if a and a.max_marks else 100.0
-            eff = float(s.final_score if s.final_score is not None else (s.ai_score or 0.0))
-            scores.append((eff / mx) * 100 if mx > 0 else 0.0)
-        return sum(scores) / len(scores)
+        for assignment in assignments:
+            submission = by_assignment.get(assignment.id)
+            if submission and submission.status == "graded":
+                max_marks = float(assignment.max_marks or 100.0)
+                effective = float(
+                    submission.final_score
+                    if submission.final_score is not None
+                    else (submission.ai_score or 0.0)
+                )
+                scores.append((effective / max_marks) * 100 if max_marks > 0 else 0.0)
+            else:
+                scores.append(0.0)
+        return sum(scores) / len(assignments)
 
     ranked = sorted(enrolled_students, key=lambda u: -_student_avg(u.id))
     rank = next((i + 1 for i, u in enumerate(ranked) if u.id == student.id), None)

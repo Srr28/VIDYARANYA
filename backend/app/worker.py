@@ -11,19 +11,23 @@ exponential backoff and retry mechanisms.
 import asyncio
 import logging
 from pathlib import Path
+import re
 from typing import Any
 import uuid
 
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.database import SessionLocal
+from app.core.database import SessionLocal, engine
+from app.db.phase4_schema import ensure_submission_depth_columns
 from app.models.analytics_report import AnalyticsReport
 from app.models.assignment import Assignment
+from app.models.assignment_reference import AssignmentReference
 from app.models.course import Course
 from app.models.note import Note
 from app.models.submission import Submission
 from app.models.submission_text import SubmissionText
+from app.services.agents.eval_graph import integrity_node, run_evaluation_graph
 from app.services.grading_service import grade
 from app.services.ocr_service import extract_text_from_bytes
 from app.services.queue_service import get_redis_settings, queue_service
@@ -31,6 +35,7 @@ from app.services.rag_service import index_note
 from app.services.storage_service import storage_service
 
 logger = logging.getLogger("vidyaranya.worker")
+_legacy_grade = grade
 
 try:
     from arq.worker import Retry
@@ -57,9 +62,16 @@ def _compute_mastery_level(score: float, max_score: float) -> str:
 
 
 def _is_rate_limit_error(exc: Exception) -> bool:
-    """Determine if an exception is caused by Groq / LLM rate limits (429)."""
+    """Detect Groq rate-limit errors, including token-limit responses returned as 413."""
     exc_str = str(exc).lower()
-    if "429" in exc_str or "rate limit" in exc_str or "ratelimit" in exc_str or "quota" in exc_str:
+    if any(marker in exc_str for marker in (
+        "429",
+        "rate limit",
+        "rate_limit_exceeded",
+        "ratelimit",
+        "tokens per minute",
+        "quota",
+    )):
         return True
     # Check for groq.RateLimitError class name
     if "ratelimiterror" in exc.__class__.__name__.lower():
@@ -67,9 +79,20 @@ def _is_rate_limit_error(exc: Exception) -> bool:
     return False
 
 
+def _rate_limit_retry_after_seconds(exc: Exception) -> int | None:
+    """Extract Groq's suggested wait (for example, `20m46.7s`) when present."""
+    match = re.search(r"try again in\s+(?:(\d+)m)?(\d+(?:\.\d+)?)s", str(exc), re.IGNORECASE)
+    if not match:
+        return None
+    minutes = int(match.group(1) or 0)
+    seconds = float(match.group(2) or 0)
+    return max(1, int(minutes * 60 + seconds + 2))
+
+
 async def startup(ctx: dict[str, Any]) -> None:
     """Initialize worker context resources."""
     logger.info("Starting Vidyaranya background task worker...")
+    ensure_submission_depth_columns(engine)
     ctx["db_factory"] = SessionLocal
 
 
@@ -125,31 +148,92 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
                     logger.warning("Failed to download/extract text for submission %s: %s", submission_id, exc)
                     extracted_text = ""
 
+        logger.info(
+            "Extracted %d characters for submission %s",
+            len(extracted_text),
+            submission_id,
+        )
         submission.text_content = extracted_text
+        if not extracted_text.strip():
+            # Never convert an unreadable/unsupported upload into an AI zero.
+            # Leave it for teacher review and tell the student what happened.
+            submission.status = "pending"
+            submission.ai_score = None
+            submission.mastery_level = None
+            submission.depth_score = None
+            submission.depth_label = None
+            submission.topic_scores = None
+            submission.feedback_text = (
+                "AI could not extract readable text from this file, so it was not scored. "
+                "Please ask your teacher to review the upload or submit a clearer, text-readable file."
+            )
+            submission.integrity_score = None
+            submission.plagiarism_flag = False
+            db.commit()
+            return {"status": submission.status, "submission_id": submission_id, "reason": "no_readable_text"}
 
         # Run AI grading with rate-limit retry logic
         grade_result = None
+        evaluation_state: dict[str, Any] | None = None
         max_retries = settings.WORKER_MAX_RETRIES
         backoff_delay = settings.WORKER_RETRY_DELAY * (2 ** (attempt - 1))
 
         try:
-            # Run blocking grading in thread pool to prevent worker event loop stalling
-            grade_result = await asyncio.to_thread(grade, extracted_text, assignment.rubric or [])
+            # Run the Phase 4 LangGraph pipeline in a thread so blocking Groq,
+            # ChromaDB, and embedding calls do not stall the ARQ event loop.
+            if grade is not _legacy_grade:
+                # Compatibility hook for existing tests and explicitly mocked
+                # legacy grading integrations. Production uses the graph below.
+                grade_result = await asyncio.to_thread(grade, extracted_text, assignment.rubric or [])
+            else:
+                evaluation_state = await asyncio.to_thread(
+                    run_evaluation_graph,
+                    {
+                        "submission_id": str(submission.id),
+                        "assignment_id": str(assignment.id),
+                        "course_id": str(assignment.course_id),
+                        "raw_text": extracted_text,
+                        "rubric": assignment.rubric or [],
+                        "reference_solution": (
+                            db.query(AssignmentReference.solution_text)
+                            .filter(AssignmentReference.assignment_id == assignment.id)
+                            .scalar()
+                            or ""
+                        ),
+                        "topics_list": assignment.topics_list or [],
+                        "max_score": float(assignment.max_marks or 100),
+                    },
+                )
+                mastery_result = evaluation_state.get("mastery_result", {})
+                grade_result = {
+                    "total_score": mastery_result.get("total_score", 0),
+                    "max_score": mastery_result.get("max_score", assignment.max_marks or 100),
+                    "breakdown": mastery_result.get("topic_scores", []),
+                    "depth_score": mastery_result.get("depth_score"),
+                    "depth_label": mastery_result.get("depth_label"),
+                    "general_feedback": evaluation_state.get("feedback_markdown", ""),
+                    "integrity_score": evaluation_state.get("integrity_score", 1.0),
+                    "plagiarism_flag": evaluation_state.get("plagiarism_flag", False),
+                    "plagiarism_matches": evaluation_state.get("plagiarism_matches", []),
+                }
         except Exception as exc:
             if _is_rate_limit_error(exc):
+                provider_wait = _rate_limit_retry_after_seconds(exc)
+                retry_delay = max(backoff_delay, provider_wait or 0)
                 logger.warning(
-                    "Groq 429 Rate Limit hit for submission %s on attempt %d/%d. Backing off for %ds.",
+                    "Groq 429 Rate Limit hit for submission %s on attempt %d/%d. Backing off for %ds%s.",
                     submission_id,
                     attempt,
                     max_retries,
-                    backoff_delay,
+                    retry_delay,
+                    " (provider retry-after)" if provider_wait else "",
                 )
                 if attempt < max_retries:
                     if ctx.get("is_fallback"):
-                        await asyncio.sleep(backoff_delay)
+                        await asyncio.sleep(retry_delay)
                         ctx["job_try"] = attempt + 1
                         return await evaluate_submission_task(ctx, submission_id)
-                    raise Retry(defer=backoff_delay)
+                    raise Retry(defer=retry_delay)
                 else:
                     logger.error("Exceeded max retries for submission %s due to rate limits.", submission_id)
                     raise exc
@@ -165,6 +249,22 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
                 "general_feedback": "Automated evaluation completed with default parameters.",
             }
 
+        if evaluation_state is not None:
+            # Repeat the inexpensive integrity lookup after the long AI grading
+            # calls so concurrent submissions have had time to enter the index.
+            latest_integrity = await asyncio.to_thread(
+                integrity_node,
+                {
+                    "submission_id": str(submission.id),
+                    "assignment_id": str(assignment.id),
+                    "raw_text": extracted_text,
+                },
+            )
+            evaluation_state.update(latest_integrity)
+            grade_result["integrity_score"] = latest_integrity.get("integrity_score", 1.0)
+            grade_result["plagiarism_flag"] = latest_integrity.get("plagiarism_flag", False)
+            grade_result["plagiarism_matches"] = latest_integrity.get("plagiarism_matches", [])
+
         ai_score_val = float(grade_result.get("total_score", 0))
         max_score_val = float(assignment.max_marks or grade_result.get("max_score", 100))
         mastery_lvl = _compute_mastery_level(ai_score_val, max_score_val)
@@ -172,16 +272,50 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
         topic_sc = grade_result.get("breakdown")
 
         # Plagiarism / integrity assessment
-        integrity_sc = 1.0
-        plagiarism_flag_val = False
+        integrity_sc = float(grade_result.get("integrity_score", 1.0))
+        plagiarism_flag_val = bool(grade_result.get("plagiarism_flag", False))
 
         submission.ai_score = ai_score_val
         submission.mastery_level = mastery_lvl
+        submission.depth_score = grade_result.get("depth_score")
+        submission.depth_label = grade_result.get("depth_label")
         submission.topic_scores = topic_sc
         submission.feedback_text = feedback_txt
         submission.integrity_score = integrity_sc
         submission.plagiarism_flag = plagiarism_flag_val
         submission.status = "flagged" if plagiarism_flag_val else "graded"
+
+        # If a previously graded peer is found to match this submission, flag
+        # that peer for teacher review too. In-flight peers will run the final
+        # lookup above before saving their own result.
+        for match in grade_result.get("plagiarism_matches", []):
+            similarity = float(match.get("similarity", 0) or 0)
+            if similarity <= 0.85:
+                continue
+            try:
+                matched_id = uuid.UUID(str(match.get("submission_id", "")))
+            except (ValueError, TypeError, AttributeError):
+                continue
+            if matched_id == submission.id:
+                continue
+            matched_submission = (
+                db.query(Submission)
+                .filter(
+                    Submission.id == matched_id,
+                    Submission.assignment_id == assignment.id,
+                )
+                .first()
+            )
+            if matched_submission and matched_submission.status in {"graded", "flagged"}:
+                matched_submission.plagiarism_flag = True
+                matched_submission.status = "flagged"
+                peer_integrity = max(0.0, min(1.0, 1.0 - similarity))
+                matched_submission.integrity_score = min(
+                    float(matched_submission.integrity_score)
+                    if matched_submission.integrity_score is not None
+                    else 1.0,
+                    peer_integrity,
+                )
 
         # Update or create submission_texts record
         sub_text = db.query(SubmissionText).filter(SubmissionText.submission_id == submission.id).first()
@@ -209,9 +343,24 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
             "submission_id": str(submission.id),
             "ai_score": submission.ai_score,
             "mastery_level": submission.mastery_level,
+            "depth_score": submission.depth_score,
+            "depth_label": submission.depth_label,
             "topic_scores": submission.topic_scores,
         }
 
+    except asyncio.CancelledError:
+        # ARQ cancels the job coroutine when job_timeout expires. Keep the
+        # submission retryable instead of leaving the UI stuck on evaluating.
+        logger.warning("Evaluation task cancelled or timed out for submission %s", submission_id)
+        try:
+            db.rollback()
+            sub = db.query(Submission).filter(Submission.id == uuid.UUID(submission_id)).first()
+            if sub and sub.status == "evaluating":
+                sub.status = "pending_eval"
+                db.commit()
+        except Exception:
+            db.rollback()
+        raise
     except Retry:
         raise
     except Exception as exc:
@@ -325,6 +474,8 @@ class WorkerSettings:
     on_startup = startup
     on_shutdown = shutdown
     redis_settings = get_redis_settings()
-    max_jobs = 10
-    job_timeout = 300
+    # Long submissions make several paced model calls; process one evaluation
+    # at a time to reduce Groq 429s and avoid overlapping integrity writes.
+    max_jobs = 1
+    job_timeout = 900
     max_tries = settings.WORKER_MAX_RETRIES

@@ -111,6 +111,8 @@ CREATE TABLE IF NOT EXISTS submissions (
     text_content TEXT,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
 );
+ALTER TABLE submissions ADD COLUMN IF NOT EXISTS depth_score DECIMAL(3, 2);
+ALTER TABLE submissions ADD COLUMN IF NOT EXISTS depth_label VARCHAR(32);
 CREATE INDEX IF NOT EXISTS idx_submissions_assignment ON submissions(assignment_id);
 CREATE INDEX IF NOT EXISTS idx_submissions_student ON submissions(student_id);
 

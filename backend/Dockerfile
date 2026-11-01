@@ -11,7 +11,19 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+
+RUN pip install --no-cache-dir \
+    --default-timeout=600 \
+    --retries 10 \
+    --index-url https://pypi.org/simple \
+    --extra-index-url https://download.pytorch.org/whl/cpu \
+    torch==2.2.2+cpu
+
+RUN pip install --no-cache-dir \
+    --default-timeout=600 \
+    --retries 10 \
+    --extra-index-url https://download.pytorch.org/whl/cpu \
+    -r requirements.txt
 
 COPY . .
 

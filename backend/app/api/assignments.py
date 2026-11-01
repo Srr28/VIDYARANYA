@@ -10,13 +10,21 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user, get_db
 from app.models.announcement import Announcement
 from app.models.assignment import Assignment
+from app.models.assignment_reference import AssignmentReference
 from app.models.assignment_attachment import AssignmentAttachment
 from app.models.course import Course
 from app.models.enrollment import Enrollment
 from app.models.submission import Submission
 from app.models.user import User
-from app.schemas.assignment import AssignmentCreate, AssignmentDueDateUpdate, AssignmentOut
+from app.schemas.assignment import (
+    AssignmentCreate,
+    AssignmentDueDateUpdate,
+    AssignmentOut,
+    AssignmentReferenceOut,
+    AssignmentReferenceUpdate,
+)
 from app.services.storage_service import get_assignment_attachment_key, storage_service
+from app.services.queue_service import queue_service
 
 router = APIRouter(prefix="/assignments", tags=["assignments"])
 
@@ -92,6 +100,12 @@ def create_assignment(
         max_marks=payload.max_marks if payload.max_marks is not None else (payload.max_score or 100),
     )
     db.add(assignment)
+    db.flush()
+    if payload.private_reference_solution and payload.private_reference_solution.strip():
+        db.add(AssignmentReference(
+            assignment_id=assignment.id,
+            solution_text=payload.private_reference_solution.strip(),
+        ))
     due_label = payload.due_date.strftime("%b %d, %Y %I:%M %p") if payload.due_date else "No due date"
     db.add(
         Announcement(
@@ -103,6 +117,81 @@ def create_assignment(
     db.commit()
     db.refresh(assignment)
     return assignment
+
+
+def _require_assignment_owner(assignment_id: uuid.UUID, db: Session, current_user: User) -> Assignment:
+    assignment = db.query(Assignment).filter(Assignment.id == assignment_id).first()
+    if not assignment:
+        raise HTTPException(status_code=404, detail="Assignment not found")
+    course = db.query(Course).filter(Course.id == assignment.course_id).first()
+    if not course or course.faculty_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Only the classroom owner can access the answer key")
+    return assignment
+
+
+@router.get("/{assignment_id}/reference", response_model=AssignmentReferenceOut)
+def get_assignment_reference(
+    assignment_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> AssignmentReferenceOut:
+    _require_assignment_owner(assignment_id, db, current_user)
+    reference = db.query(AssignmentReference).filter(
+        AssignmentReference.assignment_id == assignment_id
+    ).first()
+    if not reference:
+        raise HTTPException(status_code=404, detail="No answer key has been added")
+    return AssignmentReferenceOut(solution_text=reference.solution_text)
+
+
+@router.put("/{assignment_id}/reference", response_model=AssignmentReferenceOut)
+def put_assignment_reference(
+    assignment_id: uuid.UUID,
+    payload: AssignmentReferenceUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> AssignmentReferenceOut:
+    _require_assignment_owner(assignment_id, db, current_user)
+    solution_text = payload.solution_text.strip()
+    if not solution_text:
+        raise HTTPException(status_code=422, detail="Answer key cannot be blank")
+    reference = db.query(AssignmentReference).filter(
+        AssignmentReference.assignment_id == assignment_id
+    ).first()
+    if reference is None:
+        reference = AssignmentReference(assignment_id=assignment_id, solution_text=solution_text)
+        db.add(reference)
+    else:
+        reference.solution_text = solution_text
+    db.commit()
+    return AssignmentReferenceOut(solution_text=reference.solution_text)
+
+
+@router.post("/{assignment_id}/reevaluate")
+async def reevaluate_assignment_submissions(
+    assignment_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    _require_assignment_owner(assignment_id, db, current_user)
+    submissions = db.query(Submission).filter(Submission.assignment_id == assignment_id).all()
+    for submission in submissions:
+        submission.status = "pending_eval"
+        submission.depth_score = None
+        submission.depth_label = None
+    db.commit()
+
+    queued = 0
+    for submission in submissions:
+        try:
+            await queue_service.enqueue_submission_evaluation(submission.id)
+            queued += 1
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Queued {queued} of {len(submissions)} submissions; retry to queue the rest",
+            ) from exc
+    return {"queued": queued, "assignment_id": str(assignment_id)}
 
 
 @router.get("", response_model=list[AssignmentOut])

@@ -53,7 +53,7 @@ def grade(submission_text: str, rubric: list) -> dict:
     )
 
     completion = GROQ_CLIENT.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model=settings.GROQ_MODEL,
         messages=[{"role": "system", "content": prompt}],
     )
 

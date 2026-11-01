@@ -4,7 +4,7 @@ from pathlib import Path
 import uuid
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -170,8 +170,14 @@ def download_note(
         raise HTTPException(status_code=403, detail="No access to this note")
 
     if storage_service.is_r2_active:
-        url = storage_service.generate_presigned_get_url(note.file_key)
-        return RedirectResponse(url=url)
+        try:
+            content = storage_service.download_file_bytes(note.file_key)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="File not found") from exc
+        return Response(
+            content=content,
+            media_type="application/octet-stream",
+        )
 
     file_path = Path(note.file_key)
     if not file_path.is_file():

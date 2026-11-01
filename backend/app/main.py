@@ -9,6 +9,7 @@ from app.api import analytics, announcements, assignments, auth, chat, courses, 
 from app.api.deps import get_current_user, get_db
 from app.core.config import settings
 from app.core.database import Base, engine
+from app.db.phase4_schema import ensure_submission_depth_columns
 from app.models.assignment import Assignment
 from app.models.course import Course
 from app.models.submission import Submission
@@ -41,6 +42,7 @@ async def add_security_headers(request: Request, call_next):
 @app.on_event("startup")
 def on_startup() -> None:
     Base.metadata.create_all(bind=engine)
+    ensure_submission_depth_columns(engine)
 
 
 @app.on_event("shutdown")

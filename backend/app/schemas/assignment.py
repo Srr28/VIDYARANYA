@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 
 class AssignmentCreate(BaseModel):
@@ -12,9 +12,10 @@ class AssignmentCreate(BaseModel):
     rubric: list[dict] = []
     reference_note_id: uuid.UUID | None = None
     ai_eval_enabled: bool = True
-    max_marks: int = 100
+    max_marks: int = Field(default=100, ge=1)
     max_score: int | None = None
     due_date: datetime | None = None
+    private_reference_solution: str | None = Field(default=None, max_length=5000)
 
     @model_validator(mode="before")
     @classmethod
@@ -25,6 +26,28 @@ class AssignmentCreate(BaseModel):
             elif "max_score" not in data and "max_marks" in data:
                 data["max_score"] = data["max_marks"]
         return data
+
+    @model_validator(mode="after")
+    def validate_rubric(self) -> "AssignmentCreate":
+        if not self.rubric:
+            return self
+        try:
+            points = [float(item.get("max_points", 0)) for item in self.rubric]
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError("Each rubric criterion must include numeric max_points") from exc
+        if any(not str(item.get("criterion", "")).strip() or value < 0 for item, value in zip(self.rubric, points)):
+            raise ValueError("Rubric criteria need a name and non-negative points")
+        if abs(sum(points) - self.max_marks) > 0.001:
+            raise ValueError("Rubric points must add up to max_marks")
+        return self
+
+
+class AssignmentReferenceUpdate(BaseModel):
+    solution_text: str = Field(min_length=1, max_length=5000)
+
+
+class AssignmentReferenceOut(BaseModel):
+    solution_text: str
 
 
 class AssignmentOut(BaseModel):

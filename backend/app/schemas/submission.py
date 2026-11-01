@@ -14,6 +14,8 @@ class SubmissionOut(BaseModel):
     ai_score: float | None = None
     final_score: float | None = None
     mastery_level: str | None = None
+    depth_score: float | None = None
+    depth_label: str | None = None
     topic_scores: list | dict | None = None
     feedback_text: str | None = None
     integrity_score: float | None = None

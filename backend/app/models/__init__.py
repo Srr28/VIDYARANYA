@@ -1,5 +1,6 @@
 from app.models.announcement import Announcement
 from app.models.assignment import Assignment
+from app.models.assignment_reference import AssignmentReference
 from app.models.assignment_attachment import AssignmentAttachment
 from app.models.analytics_report import AnalyticsReport
 from app.models.chat import ChatMessage
@@ -18,6 +19,7 @@ __all__ = [
     "Enrollment",
     "Note",
     "Assignment",
+    "AssignmentReference",
     "AssignmentAttachment",
     "Announcement",
     "Submission",

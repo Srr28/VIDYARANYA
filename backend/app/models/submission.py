@@ -40,6 +40,8 @@ class Submission(Base):
     ai_score: Mapped[float | None] = mapped_column(Numeric(5, 2), nullable=True)
     final_score: Mapped[float | None] = mapped_column(Numeric(5, 2), nullable=True)
     mastery_level: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    depth_score: Mapped[float | None] = mapped_column(Numeric(3, 2), nullable=True)
+    depth_label: Mapped[str | None] = mapped_column(String(32), nullable=True)
     topic_scores: Mapped[dict | list | None] = mapped_column(
         JSON().with_variant(JSONB, "postgresql"),
         nullable=True,

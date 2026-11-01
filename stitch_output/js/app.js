@@ -85,6 +85,7 @@ const appState = {
   commentsBySubmission: {},
   leaderboardByCourse: {},
   myGradesByCourse: {},
+  gradePollingTimer: null,
   announcementsByCourse: {},
   peopleByCourse: {},
   courseResourcesLoadedByCourse: {},
@@ -109,6 +110,20 @@ function safe(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
+}
+
+function evaluationStatusLabel(status) {
+  const labels = {
+    pending_eval: "Queued for AI evaluation",
+    evaluating: "AI evaluation in progress",
+    pending: "Needs readable text / teacher review",
+    graded: "AI evaluation complete",
+    flagged: "Flagged for teacher review",
+    awaiting_release: "Score and feedback locked until deadline",
+    overdue: "Overdue",
+    missing: "Not submitted",
+  };
+  return labels[status] || status || "Submitted";
 }
 
 function formatAiInline(value) {
@@ -1569,6 +1584,21 @@ function openCreateAssignmentModal(courseId) {
           <input id="create-assignment-due" type="datetime-local" class="gc-input rounded-xl px-3 py-2 text-sm">
           <input id="create-assignment-max" type="number" min="1" value="100" class="gc-input rounded-xl px-3 py-2 text-sm" required>
         </div>
+        <section class="rounded-xl border border-slate-200 p-3 space-y-2">
+          <div class="flex items-center justify-between gap-2">
+            <div><h3 class="text-sm font-semibold text-slate-800">Grading rubric</h3><p class="text-xs text-slate-500">Criterion points must add up to the maximum marks.</p></div>
+            <button id="add-assignment-criterion" type="button" class="gc-btn-tonal px-3 py-1.5 rounded-full text-xs">Add criterion</button>
+          </div>
+          <div id="assignment-rubric-rows" class="space-y-2">
+            <div class="assignment-rubric-row grid grid-cols-[1fr_5rem_auto] gap-2">
+              <input data-rubric-criterion class="gc-input min-w-0 rounded-lg px-3 py-2 text-sm" placeholder="Criterion, e.g. Correct method" value="Overall" required>
+              <input data-rubric-points type="number" min="0" step="0.5" class="gc-input rounded-lg px-2 py-2 text-sm" value="100" required>
+              <button type="button" data-remove-rubric class="gc-btn-tonal px-2 rounded-lg text-xs" aria-label="Remove criterion">Remove</button>
+            </div>
+          </div>
+        </section>
+        <label class="block text-sm font-medium text-slate-700" for="create-assignment-reference">Private reference solution <span class="font-normal text-slate-500">(teacher and grader only)</span></label>
+        <textarea id="create-assignment-reference" class="gc-input w-full rounded-xl px-3 py-2 text-sm" rows="5" maxlength="5000" placeholder="Paste an answer key or model solution. Valid alternative approaches can still receive credit."></textarea>
         <input id="create-assignment-file" type="file" multiple class="gc-input w-full rounded-xl px-3 py-2 text-sm">
         <div class="flex justify-end gap-2 pt-2">
           <button type="button" data-modal-close class="gc-btn-tonal px-4 py-2 rounded-full text-sm">Cancel</button>
@@ -1578,21 +1608,64 @@ function openCreateAssignmentModal(courseId) {
     `,
   );
 
+  const assignmentDialog = modal.querySelector(".gc-dialog");
+  const assignmentDialogHeader = assignmentDialog?.firstElementChild;
+  const assignmentDialogBody = assignmentDialog?.lastElementChild;
+  if (assignmentDialog instanceof HTMLElement && assignmentDialogBody instanceof HTMLElement) {
+    assignmentDialog.style.maxHeight = "calc(100dvh - 2rem)";
+    assignmentDialog.style.display = "flex";
+    assignmentDialog.style.flexDirection = "column";
+    assignmentDialog.style.overflow = "hidden";
+    if (assignmentDialogHeader instanceof HTMLElement) assignmentDialogHeader.style.flexShrink = "0";
+    assignmentDialogBody.style.minHeight = "0";
+    assignmentDialogBody.style.overflowY = "auto";
+    assignmentDialogBody.style.overscrollBehavior = "contain";
+  }
+
+  const rubricRows = modal.querySelector("#assignment-rubric-rows");
+  modal.querySelector("#add-assignment-criterion")?.addEventListener("click", () => {
+    const row = document.createElement("div");
+    row.className = "assignment-rubric-row grid grid-cols-[1fr_5rem_auto] gap-2";
+    row.innerHTML = '<input data-rubric-criterion class="gc-input min-w-0 rounded-lg px-3 py-2 text-sm" placeholder="Criterion name" required><input data-rubric-points type="number" min="0" step="0.5" class="gc-input rounded-lg px-2 py-2 text-sm" value="0" required><button type="button" data-remove-rubric class="gc-btn-tonal px-2 rounded-lg text-xs" aria-label="Remove criterion">Remove</button>';
+    rubricRows?.appendChild(row);
+  });
+  rubricRows?.addEventListener("click", (event) => {
+    const remove = event.target.closest("[data-remove-rubric]");
+    if (remove && rubricRows.querySelectorAll(".assignment-rubric-row").length > 1) remove.closest(".assignment-rubric-row").remove();
+  });
+  modal.querySelector("#create-assignment-max")?.addEventListener("input", (event) => {
+    const rows = rubricRows?.querySelectorAll("[data-rubric-points]") || [];
+    if (rows.length === 1 && rubricRows.querySelector("[data-rubric-criterion]")?.value === "Overall") {
+      rows[0].value = event.target.value;
+    }
+  });
+
   modal.querySelector("#create-assignment-form")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const title = modal.querySelector("#create-assignment-title")?.value?.trim() || "";
     const description = modal.querySelector("#create-assignment-description")?.value?.trim() || "";
     const dueDateValue = modal.querySelector("#create-assignment-due")?.value || "";
     const max = Number(modal.querySelector("#create-assignment-max")?.value || 100);
+    const rubric = Array.from(rubricRows?.querySelectorAll(".assignment-rubric-row") || []).map((row) => ({
+      criterion: row.querySelector("[data-rubric-criterion]")?.value?.trim() || "",
+      max_points: Number(row.querySelector("[data-rubric-points]")?.value || 0),
+    }));
+    const rubricTotal = rubric.reduce((sum, item) => sum + item.max_points, 0);
+    const referenceSolution = modal.querySelector("#create-assignment-reference")?.value?.trim() || "";
     const files = Array.from(modal.querySelector("#create-assignment-file")?.files || []);
     if (!title || !max) return;
+    if (rubric.some((item) => !item.criterion || item.max_points < 0) || Math.abs(rubricTotal - max) > 0.001) {
+      showToast(`Rubric points (${rubricTotal}) must add up to maximum marks (${max}).`, true);
+      return;
+    }
 
     try {
       const assignment = await apiCall("/assignments", "POST", {
         course_id: courseId,
         title,
         description: description || null,
-        rubric: [{ criterion: "Overall", max_points: max, feedback: "Baseline rubric" }],
+        rubric,
+        private_reference_solution: referenceSolution || null,
         due_date: dueDateValue ? new Date(dueDateValue).toISOString() : null,
         max_score: max,
       });
@@ -1856,7 +1929,10 @@ function renderClasswork(course, owner) {
     const mySubmission = appState.mySubmissionByAssignment[assignment.id] || null;
     const myComments = mySubmission?.id ? (appState.commentsBySubmission[mySubmission.id] || []) : [];
     const deadline = dueState(assignment.due_date);
-    const myScore = mySubmission ? effectiveScore(mySubmission) : null;
+    const dueTimestamp = assignment.due_date ? new Date(assignment.due_date).getTime() : NaN;
+    const submissionClosed = Number.isFinite(dueTimestamp) && dueTimestamp <= Date.now();
+    const resultsReleased = owner || mySubmission?.results_released === true;
+    const myScore = resultsReleased && mySubmission ? effectiveScore(mySubmission) : null;
     const dueLocalValue = assignment.due_date ? toDateTimeLocalValue(assignment.due_date) : "";
 
     return `
@@ -1889,6 +1965,7 @@ function renderClasswork(course, owner) {
 
               <div class="mt-5 space-y-3">
                 <button class="gc-btn-primary px-4 py-2 rounded-lg text-sm" data-open-grading="${safe(assignment.id)}">View submissions & grade</button>
+                <button class="gc-btn-tonal px-4 py-2 rounded-lg text-sm" data-assignment-reference="${safe(assignment.id)}">Set private answer key & regrade</button>
                 <form id="assignment-due-update-form" class="grid sm:grid-cols-[1fr_auto] gap-2">
                   <input id="assignment-detail-due" type="datetime-local" class="gc-input rounded-lg px-3 py-2 text-sm" value="${safe(dueLocalValue)}">
                   <button class="gc-btn-tonal px-4 py-2 rounded-lg text-sm" type="submit" data-assignment-update-due="${safe(assignment.id)}">Save due date</button>
@@ -1932,16 +2009,22 @@ function renderClasswork(course, owner) {
                     <h4 class="text-base font-medium text-slate-800">Your work</h4>
                     <span class="text-xs px-2 py-1 rounded-full ${deadline.pill}">${mySubmission ? "Turned in" : "Assigned"}</span>
                   </div>
-                  <p class="text-xs text-slate-600">Score: ${myScore === null || myScore === undefined ? "-" : `${safe(myScore)} / ${safe(assignment.max_score)}`}</p>
+                  ${resultsReleased
+                    ? `<p class="text-xs text-slate-600">Score: ${myScore === null || myScore === undefined ? "-" : `${safe(myScore)} / ${safe(assignment.max_score)}`}</p>`
+                    : `<p class="text-xs text-slate-600">Scores and feedback unlock after the deadline${assignment.due_date ? "." : "; your teacher has not set a deadline yet."}</p>`}
+                  ${resultsReleased && mySubmission?.depth_score !== null && mySubmission?.depth_score !== undefined ? `<p class="text-xs text-slate-700">Bloom’s depth: <span class="font-medium">${safe(mySubmission.depth_label || "Unclassified")}</span> (${safe(mySubmission.depth_score)}/5)</p>` : ""}
                   ${mySubmission ? `<p class="text-xs text-slate-600">Submitted: ${safe(mySubmission.file_name || `submission-${mySubmission.id}`)}</p>` : ""}
-                  ${mySubmission?.teacher_comment ? `<p class="text-xs text-slate-700 border border-slate-200 rounded-md p-2 bg-slate-50">Teacher comment: ${safe(mySubmission.teacher_comment)}</p>` : ""}
+                  ${resultsReleased && mySubmission?.feedback_text ? `<section class="rounded-lg border border-blue-100 bg-blue-50 p-3"><h5 class="text-sm font-semibold text-blue-900 mb-1">AI feedback</h5><div class="text-xs leading-5 text-slate-700">${formatAiMessageContent(mySubmission.feedback_text)}</div></section>` : ""}
+                  ${resultsReleased && mySubmission?.teacher_comment ? `<p class="text-xs text-slate-700 border border-slate-200 rounded-md p-2 bg-slate-50">Teacher comment: ${safe(mySubmission.teacher_comment)}</p>` : ""}
                   ${mySubmission ? `<button class="gc-btn-tonal px-3 py-2 rounded-lg text-sm w-full" data-open-my-submission="${safe(mySubmission.id)}" data-my-submission-file-name="${safe(mySubmission.file_name || `submission-${mySubmission.id}`)}">Open submitted file</button>` : ""}
-                  ${mySubmission ? `<button class="gc-btn-tonal px-3 py-2 rounded-lg text-sm text-red-600 w-full" data-unsubmit-assignment="${safe(assignment.id)}">Unsubmit</button>` : ""}
+                  ${mySubmission && !submissionClosed ? `<button class="gc-btn-tonal px-3 py-2 rounded-lg text-sm text-red-600 w-full" data-unsubmit-assignment="${safe(assignment.id)}">Unsubmit</button>` : ""}
 
-                  <form id="assignment-detail-submit-form" class="space-y-2">
-                    <input id="assignment-detail-submit-file" type="file" class="gc-input rounded-lg px-3 py-2 text-sm w-full" required>
-                    <button class="gc-btn-dark px-4 py-2 rounded-lg text-sm w-full" type="submit" data-assignment-submit-id="${safe(assignment.id)}">${mySubmission ? "Resubmit" : "Turn in"}</button>
-                  </form>
+                  ${submissionClosed
+                    ? '<p class="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">The deadline has passed. Submissions and changes are closed.</p>'
+                    : `<form id="assignment-detail-submit-form" class="space-y-2">
+                        <input id="assignment-detail-submit-file" type="file" class="gc-input rounded-lg px-3 py-2 text-sm w-full" required>
+                        <button class="gc-btn-dark px-4 py-2 rounded-lg text-sm w-full" type="submit" data-assignment-submit-id="${safe(assignment.id)}">${mySubmission ? "Resubmit" : "Turn in"}</button>
+                      </form>`}
                   <div id="assignment-detail-submit-result"></div>
                 </article>
 
@@ -2063,6 +2146,20 @@ function renderGrades(courseId, owner) {
     .map((item) => {
       const deadline = dueState(item.due_date);
       const score = item.effective_score;
+      const status = item.status || "missing";
+      const isProcessing = ["pending_eval", "evaluating"].includes(status);
+      const resultsReleased = item.results_released !== false;
+      const topics = resultsReleased && Array.isArray(item.topic_scores) ? item.topic_scores : [];
+      const topicRows = topics.map((topic) => `
+        <li class="rounded-md bg-white border border-slate-200 px-2.5 py-2">
+          <div class="flex justify-between gap-3 text-xs">
+            <span class="font-medium text-slate-800">${safe(topic.topic || "Topic")}</span>
+            <span class="text-slate-600">${safe(topic.score ?? 0)}/${safe(topic.max_points ?? "-")}</span>
+          </div>
+          ${topic.evidence?.length ? `<p class="mt-1 text-xs text-slate-600">Evidence: ${safe(topic.evidence.join(" "))}</p>` : ""}
+          ${topic.missing?.length ? `<p class="mt-1 text-xs text-amber-700">Review: ${safe(topic.missing.join(" "))}</p>` : ""}
+        </li>
+      `).join("");
       return `
         <article class="p-3 rounded-lg border border-slate-200 bg-slate-50/80 space-y-1.5">
           <div class="flex items-start justify-between gap-2">
@@ -2073,10 +2170,17 @@ function renderGrades(courseId, owner) {
             <button class="gc-btn-tonal px-2.5 py-1.5 rounded-lg text-xs" data-grade-open-assignment="${safe(item.assignment_id)}">Open</button>
           </div>
           <div class="flex items-center justify-between text-xs text-slate-600">
-            <span>Status: ${safe(item.status || "missing")}</span>
-            <span>Score: ${score === null || score === undefined ? "-" : `${safe(score)}/${safe(item.max_score)}`}</span>
+            <span>Status: ${safe(evaluationStatusLabel(status))}</span>
+            <span>Score: ${!resultsReleased ? "Locked" : status === "flagged" || score === null || score === undefined ? "-" : `${safe(score)}/${safe(item.max_score)}`}</span>
           </div>
-          ${item.teacher_comment ? `<p class="text-xs text-slate-700 bg-white border border-slate-200 rounded-md px-2 py-1">Teacher: ${safe(item.teacher_comment)}</p>` : ""}
+          ${!resultsReleased ? `<p class="text-xs text-slate-600">Scores and feedback unlock after the deadline${item.due_date ? "." : "; your teacher has not set a deadline yet."}</p>` : ""}
+          ${isProcessing ? '<p class="text-xs text-blue-700">Your submission is being evaluated. This view refreshes automatically.</p>' : ""}
+          ${resultsReleased && item.mastery_level ? `<p class="text-xs text-slate-700">Mastery: <span class="font-medium">${safe(item.mastery_level)}</span></p>` : ""}
+          ${resultsReleased && item.depth_score !== null && item.depth_score !== undefined ? `<p class="text-xs text-slate-700">Bloom’s depth: <span class="font-medium">${safe(item.depth_label || "Unclassified")}</span> (${safe(item.depth_score)}/5)</p>` : ""}
+          ${resultsReleased && item.plagiarism_flag ? '<p class="text-xs font-medium text-red-700">Integrity review flagged this submission. Please contact your teacher.</p>' : ""}
+          ${topicRows ? `<details class="pt-1"><summary class="cursor-pointer text-xs font-medium text-slate-700">Topic feedback</summary><ul class="mt-2 space-y-2">${topicRows}</ul></details>` : ""}
+          ${resultsReleased && item.feedback_text ? `<section class="mt-2 rounded-lg border border-blue-100 bg-blue-50 p-3"><h4 class="text-xs font-semibold text-blue-900 mb-1">AI feedback</h4><div class="text-xs leading-5 text-slate-700">${formatAiMessageContent(item.feedback_text)}</div></section>` : ""}
+          ${resultsReleased && item.teacher_comment ? `<p class="text-xs text-slate-700 bg-white border border-slate-200 rounded-md px-2 py-1">Teacher: ${safe(item.teacher_comment)}</p>` : ""}
         </article>
       `;
     })
@@ -2087,7 +2191,7 @@ function renderGrades(courseId, owner) {
       <article class="surface-card p-5 gc-shadow">
         <div class="flex items-center justify-between mb-3">
           <h3 class="text-xl font-medium text-slate-800">Class Leaderboard</h3>
-          <p class="text-xs text-slate-500">Common view for this classroom</p>
+          <p class="text-xs text-slate-500">Only assignments past their deadline count; missing work is zero.</p>
         </div>
         ${(leaderboard.rows || []).length
           ? `
@@ -2105,7 +2209,9 @@ function renderGrades(courseId, owner) {
               </table>
             </div>
           `
-          : '<p class="text-sm text-slate-500">No graded submissions yet.</p>'}
+          : leaderboard.assignments_total === 0
+            ? '<p class="text-sm text-slate-500">The leaderboard appears after an assignment deadline passes.</p>'
+            : '<p class="text-sm text-slate-500">No graded submissions yet.</p>'}
       </article>
 
       <article class="surface-card p-5 gc-shadow">
@@ -2127,6 +2233,49 @@ function renderGrades(courseId, owner) {
       </article>
     </section>
   `;
+}
+
+function stopGradePolling() {
+  if (appState.gradePollingTimer) {
+    clearInterval(appState.gradePollingTimer);
+    appState.gradePollingTimer = null;
+  }
+}
+
+function startStudentGradePolling(courseId, owner) {
+  stopGradePolling();
+  if (owner) return;
+
+  const currentGrades = appState.myGradesByCourse[courseId];
+  if (!(currentGrades?.items || []).some((item) => ["pending_eval", "evaluating"].includes(item.status))) return;
+
+  appState.gradePollingTimer = setInterval(async () => {
+    if (appState.currentCourseId !== courseId || appState.currentTab !== "grades") {
+      stopGradePolling();
+      return;
+    }
+
+    try {
+      const previous = appState.myGradesByCourse[courseId];
+      const latest = await apiCall(`/submissions/my-grades?course_id=${courseId}`, "GET");
+      const signature = (items) => JSON.stringify((items || []).map((item) => [
+        item.assignment_id, item.status, item.effective_score, item.mastery_level,
+        item.topic_scores, item.feedback_text, item.plagiarism_flag,
+      ]));
+      appState.myGradesByCourse[courseId] = latest;
+
+      if (signature(previous?.items) !== signature(latest?.items)) {
+        await renderClassroomPage(courseId);
+        return;
+      }
+
+      if (!(latest?.items || []).some((item) => ["pending_eval", "evaluating"].includes(item.status))) {
+        stopGradePolling();
+      }
+    } catch (error) {
+      console.warn("Could not refresh student evaluation status", error);
+    }
+  }, 5000);
 }
 
 function renderPeople(courseId) {
@@ -2333,7 +2482,7 @@ function paintAssignments(courseId) {
           ? files.map((file) => `<button class="px-2 py-1 rounded-md border border-slate-300 text-xs hover:bg-white" data-assignment-download="${safe(file.id)}" data-assignment-file-name="${safe(file.file_name || file.title || "attachment")}">${safe(file.title || file.file_name || "Attachment")}</button>`).join("")
           : '<span class="text-xs text-slate-400">No attachments</span>'}
       </div>
-      ${owner ? `<div class="mt-2"><button class="gc-btn-tonal px-3 py-1.5 rounded-lg text-xs" data-open-grading="${safe(assignment.id)}">View submissions & grade</button></div>` : ""}
+      ${owner ? `<div class="mt-2 flex flex-wrap gap-2"><button class="gc-btn-tonal px-3 py-1.5 rounded-lg text-xs" data-assignment-reference="${safe(assignment.id)}">Answer key & regrade</button><button class="gc-btn-tonal px-3 py-1.5 rounded-lg text-xs" data-open-grading="${safe(assignment.id)}">View submissions & grade</button></div>` : ""}
     `;
     listHost.appendChild(row);
 
@@ -2376,6 +2525,7 @@ function renderNotifications() {
 async function openGradeAssignmentModal(courseId, assignmentId) {
   const assignment = (appState.assignmentsByCourse[courseId] || []).find((item) => sameId(item.id, assignmentId));
   if (!assignment) return;
+  const isTeacher = isCourseOwner(currentCourse() || {});
 
   const studentMap = new Map(
     (appState.peopleByCourse[courseId]?.students || []).map((student) => [String(student.id), student.name || `Student ${student.id}`]),
@@ -2385,17 +2535,47 @@ async function openGradeAssignmentModal(courseId, assignmentId) {
     `Grade: ${assignment.title}`,
     '<div id="grade-modal-body" class="space-y-3"><p class="text-sm text-slate-500">Loading submissions...</p></div>',
   );
+  const gradeDialog = modal.querySelector(".gc-dialog");
+  const gradeDialogHeader = gradeDialog?.firstElementChild;
+  const gradeDialogBody = gradeDialog?.lastElementChild;
+  if (gradeDialog instanceof HTMLElement && gradeDialogBody instanceof HTMLElement) {
+    gradeDialog.style.maxHeight = "calc(100dvh - 2rem)";
+    gradeDialog.style.display = "flex";
+    gradeDialog.style.flexDirection = "column";
+    gradeDialog.style.overflow = "hidden";
+    if (gradeDialogHeader instanceof HTMLElement) gradeDialogHeader.style.flexShrink = "0";
+    gradeDialogBody.style.minHeight = "0";
+    gradeDialogBody.style.overflowY = "auto";
+    gradeDialogBody.style.overscrollBehavior = "contain";
+  }
 
   const renderRows = (submissions) => {
     if (!submissions.length) {
       return '<p class="text-sm text-slate-500">No submissions yet for this assignment.</p>';
     }
 
-    return submissions
+    const reevaluateButton = isTeacher
+      ? '<div class="sticky top-0 z-10 rounded-lg border border-blue-100 bg-blue-50 p-3 flex flex-wrap items-center justify-between gap-2"><p class="text-xs text-blue-900">Run the latest evaluator again for every submission.</p><button data-reevaluate-assignment class="gc-btn-primary rounded-lg px-3 py-2 text-xs">Re-evaluate all</button></div>'
+      : "";
+    return reevaluateButton + submissions
       .map((item) => {
         const studentName = studentMap.get(String(item.student_id)) || `Student ${item.student_id}`;
         const gradeValue = item.final_score ?? item.ai_score ?? "";
         const submittedFileName = item.file_name || `submission-${item.id}`;
+        const topics = Array.isArray(item.topic_scores) ? item.topic_scores : [];
+        const topicRows = topics.map((topic) => `
+          <li class="rounded-md border border-slate-200 bg-white px-2.5 py-2">
+            <div class="flex justify-between gap-3 text-xs"><span class="font-medium">${safe(topic.topic || "Topic")}</span><span>${safe(topic.score ?? 0)}/${safe(topic.max_points ?? "-")}</span></div>
+            ${topic.evidence?.length ? `<p class="mt-1 text-xs text-slate-600">Evidence: ${safe(topic.evidence.join(" "))}</p>` : ""}
+            ${topic.missing?.length ? `<p class="mt-1 text-xs text-amber-700">Missing / review: ${safe(topic.missing.join(" "))}</p>` : ""}
+          </li>
+        `).join("");
+        const status = item.status || "submitted";
+        const integrityLabel = item.plagiarism_flag
+          ? "Flagged for integrity review"
+          : item.integrity_score !== null && item.integrity_score !== undefined
+            ? `Originality estimate: ${Math.round(Number(item.integrity_score) * 100)}%`
+            : "Integrity check pending";
         return `
           <article class="border border-slate-200 rounded-xl p-3 bg-slate-50 space-y-2">
             <div class="flex items-center justify-between gap-2">
@@ -2409,6 +2589,13 @@ async function openGradeAssignmentModal(courseId, assignmentId) {
               </div>
             </div>
 
+            ${["pending_eval", "evaluating"].includes(status) ? '<p class="text-xs text-blue-700">AI evaluation is running; this list refreshes automatically.</p>' : ""}
+            ${item.mastery_level ? `<p class="text-xs text-slate-700">Mastery: <span class="font-medium">${safe(item.mastery_level)}</span></p>` : ""}
+            ${item.depth_score !== null && item.depth_score !== undefined ? `<p class="text-xs text-slate-700">Bloom’s depth: <span class="font-medium">${safe(item.depth_label || "Unclassified")}</span> (${safe(item.depth_score)}/5)</p>` : ""}
+            <p class="text-xs ${item.plagiarism_flag ? "font-medium text-red-700" : "text-slate-600"}">${safe(integrityLabel)}</p>
+            ${topicRows ? `<details><summary class="cursor-pointer text-xs font-medium text-slate-700">AI topic breakdown &amp; evidence</summary><ul class="mt-2 space-y-2">${topicRows}</ul></details>` : ""}
+            ${item.feedback_text ? `<details><summary class="cursor-pointer text-xs font-medium text-slate-700">AI feedback</summary><div class="mt-2 rounded-md border border-slate-200 bg-white p-3 text-xs leading-5">${formatAiMessageContent(item.feedback_text)}</div></details>` : ""}
+
             <div class="grid sm:grid-cols-[120px_1fr_auto] gap-2 items-start">
               <input id="grade-score-${safe(item.id)}" type="number" min="0" step="0.5" class="gc-input rounded-lg px-3 py-2 text-sm" value="${safe(gradeValue)}" placeholder="Score">
               <textarea id="grade-comment-${safe(item.id)}" class="gc-input rounded-lg px-3 py-2 text-sm" rows="2" placeholder="Teacher comment">${safe(item.teacher_comment || "")}</textarea>
@@ -2420,24 +2607,60 @@ async function openGradeAssignmentModal(courseId, assignmentId) {
       .join("");
   };
 
+  let pollTimer = null;
+  let shouldPoll = false;
   const refresh = async () => {
     const body = modal.querySelector("#grade-modal-body");
     if (!body) return;
 
     try {
       const response = await apiCall(`/submissions/by-assignment/${assignmentId}`, "GET");
-      body.innerHTML = renderRows(response.submissions || []);
+      const submissions = response.submissions || [];
+      shouldPoll = submissions.some((item) => ["pending_eval", "evaluating"].includes(item.status));
+      body.innerHTML = renderRows(submissions);
+      if (!shouldPoll && pollTimer) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
     } catch (error) {
       body.innerHTML = '<p class="text-sm text-red-600">Could not load submissions right now.</p>';
       showToast(error.message || "Could not load submissions", true);
     }
   };
 
+  const ensurePolling = () => {
+    if (!modal.isConnected || !shouldPoll || pollTimer) return;
+    pollTimer = setInterval(() => {
+      if (!modal.isConnected) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+        return;
+      }
+      void refresh();
+    }, 5000);
+  };
+
   await refresh();
+  ensurePolling();
 
   modal.addEventListener("click", async (event) => {
     const target = event.target;
     if (!(target instanceof HTMLElement)) return;
+
+    const reevaluateButton = target.closest("[data-reevaluate-assignment]");
+    if (reevaluateButton instanceof HTMLButtonElement) {
+      reevaluateButton.disabled = true;
+      try {
+        const result = await apiCall(`/assignments/${assignmentId}/reevaluate`, "POST");
+        showToast(`${result.queued} submission(s) queued for re-evaluation.`);
+        await refresh();
+        ensurePolling();
+      } catch (error) {
+        reevaluateButton.disabled = false;
+        showToast(error.message || "Could not queue submissions for re-evaluation", true);
+      }
+      return;
+    }
 
     const fileButton = target.closest("[data-open-submission-file]");
     if (fileButton instanceof HTMLElement) {
@@ -2484,8 +2707,16 @@ async function openGradeAssignmentModal(courseId, assignmentId) {
 
 function bindClassTabSwitch(courseId) {
   document.querySelectorAll("[data-class-tab]").forEach((button) => {
-    button.addEventListener("click", () => {
+    button.addEventListener("click", async () => {
       appState.currentTab = button.getAttribute("data-class-tab");
+      if (appState.currentTab === "grades") {
+        const [leaderboard, myGrades] = await Promise.all([
+          apiCall(`/submissions/leaderboard/${courseId}`, "GET").catch(() => ({ rows: [], assignments_total: 0 })),
+          apiCall(`/submissions/my-grades?course_id=${courseId}`, "GET").catch(() => ({ items: [], summary: null, is_owner: false })),
+        ]);
+        appState.leaderboardByCourse[courseId] = leaderboard;
+        appState.myGradesByCourse[courseId] = myGrades;
+      }
       renderClassroomPage(courseId);
     });
   });
@@ -2959,6 +3190,48 @@ function bindClassroomHandlers(course) {
       const assignmentId = gradingButton.getAttribute("data-open-grading");
       if (!assignmentId) return;
       await openGradeAssignmentModal(courseId, assignmentId);
+      return;
+    }
+
+    const referenceButton = target.closest("[data-assignment-reference]");
+    if (referenceButton instanceof HTMLElement) {
+      if (!owner) return;
+      const assignmentId = referenceButton.getAttribute("data-assignment-reference");
+      if (!assignmentId) return;
+      try {
+        const existing = await apiCall(`/assignments/${assignmentId}/reference`, "GET").catch(() => null);
+        const modal = openModal(
+          "Private answer key",
+          `<form id="assignment-reference-form" class="space-y-3">
+            <p class="text-sm text-slate-600">Only you and the AI grader can access this answer key. The assignment's current rubric will be applied, and valid alternative approaches can receive credit.</p>
+            <textarea id="assignment-reference-text" class="gc-input w-full rounded-xl px-3 py-2 text-sm" rows="8" maxlength="5000" placeholder="Paste the model solution or answer key" required>${safe(existing?.solution_text || "")}</textarea>
+            <div class="flex justify-end gap-2 pt-2">
+              <button type="button" data-modal-close class="gc-btn-tonal px-4 py-2 rounded-full text-sm">Cancel</button>
+              <button type="submit" class="gc-btn-primary px-4 py-2 rounded-full text-sm">Save & re-evaluate submissions</button>
+            </div>
+          </form>`,
+        );
+        modal.querySelector("#assignment-reference-form")?.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          const solution_text = modal.querySelector("#assignment-reference-text")?.value?.trim() || "";
+          if (!solution_text) return;
+          const submitButton = event.submitter;
+          if (submitButton) submitButton.disabled = true;
+          try {
+            await apiCall(`/assignments/${assignmentId}/reference`, "PUT", { solution_text });
+            const result = await apiCall(`/assignments/${assignmentId}/reevaluate`, "POST");
+            closeModal();
+            showToast(`Answer key saved; ${result.queued} submission(s) queued for re-evaluation.`);
+            appState.myGradesByCourse[courseId] = await apiCall(`/submissions/my-grades?course_id=${courseId}`, "GET").catch(() => appState.myGradesByCourse[courseId]);
+            await renderClassroomPage(courseId);
+          } catch (error) {
+            if (submitButton) submitButton.disabled = false;
+            showToast(error.message || "Could not save answer key or queue re-evaluation", true);
+          }
+        });
+      } catch (error) {
+        showToast(error.message || "Could not open answer key", true);
+      }
     }
   };
 
@@ -3073,7 +3346,7 @@ function bindClassroomHandlers(course) {
           host.innerHTML = `
             <div class="p-3 rounded-lg border border-emerald-200 bg-emerald-50">
               <p class="text-sm font-medium text-emerald-700">Turned in successfully</p>
-              <p class="text-sm text-slate-700">Score: ${safe(detail.effective_score ?? detail.ai_score ?? detail.final_score ?? 0)}</p>
+              <p class="text-sm text-slate-700">Scores and feedback are available after the assignment deadline.</p>
             </div>
           `;
         }
@@ -3090,6 +3363,7 @@ function bindClassroomHandlers(course) {
 }
 
 async function renderClassroomPage(courseId, options = {}) {
+  stopGradePolling();
   const forceRefresh = Boolean(options?.forceRefresh);
 
   if (!appState.courses.length || forceRefresh) {
@@ -3152,6 +3426,9 @@ async function renderClassroomPage(courseId, options = {}) {
 
   bindClassTabSwitch(course.id);
   bindClassroomHandlers(course);
+  if (appState.currentTab === "grades") {
+    startStudentGradePolling(course.id, owner);
+  }
 }
 
 async function renderTodoPage() {
