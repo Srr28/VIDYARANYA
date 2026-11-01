@@ -85,6 +85,8 @@ const appState = {
   commentsBySubmission: {},
   leaderboardByCourse: {},
   myGradesByCourse: {},
+  classAnalyticsByCourse: {},
+  progressReportsByCourse: {},
   gradePollingTimer: null,
   announcementsByCourse: {},
   peopleByCourse: {},
@@ -2187,6 +2189,7 @@ function renderGrades(courseId, owner) {
     .join("");
 
   return `
+    <div class="space-y-5">
     <section class="grid lg:grid-cols-[1.2fr_.8fr] gap-5">
       <article class="surface-card p-5 gc-shadow">
         <div class="flex items-center justify-between mb-3">
@@ -2231,6 +2234,150 @@ function renderGrades(courseId, owner) {
             </div>
           `}
       </article>
+    </section>
+    ${renderPhase5Insights(courseId, owner)}
+    </div>
+  `;
+}
+
+function renderProgressTrendChart(trajectory) {
+  const points = (trajectory || [])
+    .filter((item) => !["pending_eval", "evaluating", "pending", "flagged"].includes(item.status))
+    .map((item) => ({
+      title: String(item.assignment_title || "Assignment"),
+      score: Number(item.score_pct),
+    }))
+    .filter((item) => Number.isFinite(item.score))
+    .slice(-10);
+  if (!points.length) return '<p class="text-sm text-slate-500">No finalized scores to chart yet.</p>';
+
+  const width = 640;
+  const height = 250;
+  const left = 44;
+  const right = 14;
+  const top = 16;
+  const bottom = 192;
+  const plotWidth = width - left - right;
+  const plotHeight = bottom - top;
+  const pointCoords = points.map((item, index) => ({
+    ...item,
+    x: points.length === 1 ? left + plotWidth / 2 : left + (index * plotWidth) / (points.length - 1),
+    y: bottom - (Math.max(0, Math.min(100, item.score)) / 100) * plotHeight,
+  }));
+  const grid = [0, 25, 50, 75, 100].map((value) => {
+    const y = bottom - (value / 100) * plotHeight;
+    return `<g><line x1="${left}" y1="${y}" x2="${width - right}" y2="${y}" stroke="#e2e8f0"/><text x="${left - 8}" y="${y + 4}" text-anchor="end" fill="#64748b" font-size="11">${value}</text></g>`;
+  }).join("");
+  const line = pointCoords.map((point) => `${point.x},${point.y}`).join(" ");
+  const dots = pointCoords.map((point) => `<g><circle cx="${point.x}" cy="${point.y}" r="4.5" fill="#2563eb" stroke="white" stroke-width="2"/><title>${safe(point.title)}: ${safe(Math.round(point.score * 10) / 10)}%</title></g>`).join("");
+  const labels = pointCoords.map((point) => `<text x="${point.x}" y="${bottom + 20}" text-anchor="middle" fill="#64748b" font-size="10">${safe(point.title.length > 12 ? `${point.title.slice(0, 11)}…` : point.title)}</text>`).join("");
+  return `<svg class="w-full h-auto" viewBox="0 0 ${width} ${height}" role="img" aria-label="Score trend across finalized assignments, percent scale from zero to one hundred">${grid}<line x1="${left}" y1="${top}" x2="${left}" y2="${bottom}" stroke="#94a3b8"/><line x1="${left}" y1="${bottom}" x2="${width - right}" y2="${bottom}" stroke="#94a3b8"/><polyline points="${line}" fill="none" stroke="#2563eb" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>${dots}${labels}<text x="${width / 2}" y="${height - 8}" text-anchor="middle" fill="#64748b" font-size="11">Assignments (latest ${points.length})</text></svg>`;
+}
+
+function renderTopicMasteryChart(topics) {
+  const entries = Object.entries(topics || {})
+    .map(([topic, score]) => ({ topic, score: Number(score) }))
+    .filter((item) => Number.isFinite(item.score))
+    .sort((a, b) => a.score - b.score)
+    .slice(0, 10);
+  if (!entries.length) return '<p class="text-sm text-slate-500">No topic scores released yet.</p>';
+
+  const width = 620;
+  const rowHeight = 34;
+  const height = Math.max(110, entries.length * rowHeight + 18);
+  const labelX = 12;
+  const barX = 190;
+  const barWidth = 340;
+  const rows = entries.map((item, index) => {
+    const y = 12 + index * rowHeight;
+    const value = Math.max(0, Math.min(100, item.score));
+    const color = value < 60 ? "#d97706" : value >= 80 ? "#16a34a" : "#2563eb";
+    const label = String(item.topic).trim().toLowerCase() === "overall" ? "Overall rubric score" : item.topic;
+    const shortLabel = label.length > 25 ? `${label.slice(0, 24)}…` : label;
+    return `<g><text x="${labelX}" y="${y + 17}" fill="#334155" font-size="12">${safe(shortLabel)}</text><rect x="${barX}" y="${y + 4}" width="${barWidth}" height="16" rx="8" fill="#e2e8f0"/><rect x="${barX}" y="${y + 4}" width="${(value / 100) * barWidth}" height="16" rx="8" fill="${color}"/><text x="${barX + barWidth + 10}" y="${y + 17}" fill="#334155" font-size="12">${safe(Math.round(item.score * 10) / 10)}%</text><title>${safe(label)}: ${safe(Math.round(item.score * 10) / 10)}%</title></g>`;
+  }).join("");
+  return `<svg class="w-full h-auto" viewBox="0 0 ${width} ${height}" role="img" aria-label="Topic mastery bar chart from zero to one hundred percent">${rows}<text x="${barX}" y="${height - 2}" fill="#64748b" font-size="10">0%</text><text x="${barX + barWidth}" y="${height - 2}" text-anchor="end" fill="#64748b" font-size="10">100%</text></svg>`;
+}
+
+function renderGradeDistributionChart(distribution) {
+  const grades = ["A", "B", "C", "D", "F"].map((grade) => ({ grade, count: Math.max(0, Number(distribution?.[grade]) || 0) }));
+  const maximum = Math.max(1, ...grades.map((item) => item.count));
+  const width = 360;
+  const height = 150;
+  const chartTop = 14;
+  const chartBottom = 116;
+  const chartHeight = chartBottom - chartTop;
+  const bars = grades.map((item, index) => {
+    const x = 32 + index * 66;
+    const barHeight = (item.count / maximum) * chartHeight;
+    const y = chartBottom - barHeight;
+    return `<g><rect x="${x}" y="${y}" width="34" height="${barHeight}" rx="4" fill="#2563eb"/><text x="${x + 17}" y="${Math.max(11, y - 5)}" text-anchor="middle" fill="#334155" font-size="11">${item.count}</text><text x="${x + 17}" y="${chartBottom + 18}" text-anchor="middle" fill="#64748b" font-size="12">${item.grade}</text></g>`;
+  }).join("");
+  return `<svg class="w-full h-auto max-w-sm mx-auto" viewBox="0 0 ${width} ${height}" role="img" aria-label="Grade distribution bar chart">${[0, 0.5, 1].map((ratio) => { const y = chartBottom - ratio * chartHeight; const label = Math.round(ratio * maximum); return `<g><line x1="24" y1="${y}" x2="350" y2="${y}" stroke="#e2e8f0"/><text x="18" y="${y + 4}" text-anchor="end" fill="#64748b" font-size="10">${label}</text></g>`; }).join("")}${bars}</svg>`;
+}
+
+function renderPhase5Insights(courseId, owner) {
+  if (owner) {
+    const report = appState.classAnalyticsByCourse[courseId];
+    const weakTopics = report?.weak_topics || [];
+    const atRisk = report?.at_risk_students || [];
+    const distribution = report?.grade_distribution || {};
+    const hasOverallRubric = report?.narrative?.includes("Overall rubric average:") || false;
+    const overallRubricMatch = hasOverallRubric ? report.narrative.match(/Overall rubric average:\s*([\d.]+)%/) : null;
+    const narrativeText = (report?.narrative || "").replace(/\s*Overall rubric average:\s*[\d.]+%\.\s*This is an aggregate rubric score, not a topic-level result\./i, "");
+    return `
+      <section class="surface-card p-5 gc-shadow space-y-4">
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <div><h3 class="text-xl font-medium text-slate-800">Class Learning Analytics</h3>
+            <p class="text-xs text-slate-500">Topic gaps, students needing follow-up, and grade distribution.</p></div>
+          <button id="class-analytics-refresh" class="gc-btn-tonal px-4 py-2 rounded-full text-sm">Refresh analysis</button>
+        </div>
+        ${report ? `
+          <p class="text-sm text-slate-700 whitespace-pre-line">${safe(narrativeText || "No recommendations available.")}</p>
+          ${overallRubricMatch ? `<p class="rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-sm text-blue-900"><strong>Overall rubric average: ${safe(overallRubricMatch[1])}%.</strong> This is an aggregate score, not a topic gap. Topic specific insights require separate rubric criteria.</p>` : ""}
+          <div class="grid md:grid-cols-3 gap-4">
+            <div class="rounded-lg border border-slate-200 p-3"><h4 class="text-sm font-semibold mb-2">Weak topics (&lt;60%)</h4>
+              ${weakTopics.length ? `<ul class="space-y-1">${weakTopics.map((item) => `<li class="text-sm text-slate-700">${safe(item.topic)} <span class="text-slate-500">${safe(item.average_mastery_pct)}%</span></li>`).join("")}</ul>` : `<p class="text-sm text-slate-500">${overallRubricMatch ? "No topic specific rubric results are available." : "No weak topics identified."}</p>`}
+            </div>
+            <div class="rounded-lg border border-slate-200 p-3"><h4 class="text-sm font-semibold mb-2">Students to follow up (${atRisk.length})</h4>
+              ${atRisk.length ? `<ul class="space-y-1 max-h-40 overflow-auto">${atRisk.map((item) => `<li class="text-sm text-slate-700">${safe(item.student_name)} <span class="text-slate-500">${safe(item.average_pct)}%${item.missing_overdue ? ` · ${safe(item.missing_overdue)} overdue missing` : ""}</span></li>`).join("")}</ul>` : '<p class="text-sm text-slate-500">No students currently meet the follow-up thresholds.</p>'}
+            </div>
+            <div class="rounded-lg border border-slate-200 p-3"><h4 class="text-sm font-semibold mb-2">Grade distribution</h4>
+              ${renderGradeDistributionChart(distribution)}
+            </div>
+          </div>
+        ` : '<p class="text-sm text-slate-500">Refresh to calculate current class insights.</p>'}
+      </section>
+    `;
+  }
+
+  const report = appState.progressReportsByCourse[courseId];
+  const snapshot = report?.mastery_snapshot || {};
+  const topics = snapshot.topic_mastery || {};
+  const trajectory = snapshot.trajectory || [];
+  const recommendations = snapshot.recommendations || [];
+  return `
+    <section class="surface-card p-5 gc-shadow space-y-4">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <div><h3 class="text-xl font-medium text-slate-800">Your Progress Report</h3>
+          <p class="text-xs text-slate-500">Based on assignments whose deadlines have passed.</p></div>
+        <button id="student-progress-generate" class="gc-btn-tonal px-4 py-2 rounded-full text-sm">${report ? "Refresh report" : "Generate report"}</button>
+      </div>
+      ${report ? `
+        <p class="text-sm text-slate-700">${safe(report.narrative || "No narrative available.")}</p>
+        <div class="flex flex-wrap gap-4 text-sm text-slate-700"><span>Average: <strong>${safe(snapshot.average_score_pct ?? "-")}%</strong></span><span>Trend: <strong>${safe(snapshot.trend || "-")}</strong></span><span>Class rank: <strong>${safe(report.rank ?? "-")}</strong></span></div>
+        <div class="grid md:grid-cols-3 gap-4">
+          <div class="rounded-lg border border-slate-200 p-3"><h4 class="text-sm font-semibold mb-2">Topic mastery</h4>
+            ${renderTopicMasteryChart(topics)}
+          </div>
+          <div class="rounded-lg border border-slate-200 p-3"><h4 class="text-sm font-semibold mb-2">Recommendations</h4>
+            ${recommendations.length ? `<ul class="list-disc pl-5 space-y-1">${recommendations.map((item) => `<li class="text-sm text-slate-700">${safe(item)}</li>`).join("")}</ul>` : '<p class="text-sm text-slate-500">No recommendations yet.</p>'}
+          </div>
+          <div class="rounded-lg border border-slate-200 p-3"><h4 class="text-sm font-semibold mb-2">Score trajectory</h4>
+            ${renderProgressTrendChart(trajectory)}
+          </div>
+        </div>
+      ` : '<p class="text-sm text-slate-500">Generate a report to see your progress over released assignments.</p>'}
     </section>
   `;
 }
@@ -2716,6 +2863,12 @@ function bindClassTabSwitch(courseId) {
         ]);
         appState.leaderboardByCourse[courseId] = leaderboard;
         appState.myGradesByCourse[courseId] = myGrades;
+        const course = appState.courses.find((item) => sameId(item.id, courseId));
+        if (course && isCourseOwner(course)) {
+          appState.classAnalyticsByCourse[courseId] = await apiCall(`/courses/${courseId}/analytics`, "GET").catch(() => null);
+        } else {
+          appState.progressReportsByCourse[courseId] = await apiCall(`/progress-reports/${courseId}`, "GET").catch(() => null);
+        }
       }
       renderClassroomPage(courseId);
     });
@@ -2725,6 +2878,34 @@ function bindClassTabSwitch(courseId) {
 function bindClassroomHandlers(course) {
   const courseId = course.id;
   const owner = isCourseOwner(course);
+
+  document.getElementById("class-analytics-refresh")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    button.textContent = "Analyzing…";
+    try {
+      appState.classAnalyticsByCourse[courseId] = await apiCall(`/courses/${courseId}/analytics?refresh=true`, "GET");
+      await renderClassroomPage(courseId);
+    } catch (error) {
+      showToast(error.message || "Could not refresh class analytics", true);
+      button.disabled = false;
+      button.textContent = "Refresh analysis";
+    }
+  });
+
+  document.getElementById("student-progress-generate")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    button.textContent = "Generating…";
+    try {
+      appState.progressReportsByCourse[courseId] = await apiCall(`/progress-reports?course_id=${courseId}`, "POST");
+      await renderClassroomPage(courseId);
+    } catch (error) {
+      showToast(error.message || "Could not generate progress report", true);
+      button.disabled = false;
+      button.textContent = "Generate report";
+    }
+  });
 
   document.getElementById("stream-open-announcement")?.addEventListener("click", () => {
     const compose = document.getElementById("announcement-compose-card");

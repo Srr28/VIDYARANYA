@@ -24,6 +24,8 @@ from app.models.progress_report import ProgressReport
 from app.models.submission import Submission
 from app.models.user import User
 from app.schemas.analytics import AnalyticsReportOut, ProgressReportOut
+from app.services.agents.analytics_agent import generate_class_recommendations
+from app.services.agents.progress_agent import generate_progress_narrative
 
 router = APIRouter(tags=["analytics"])
 
@@ -88,8 +90,8 @@ def _build_class_analytics(
     assignment_id: uuid.UUID | None = None,
 ) -> dict:
     """
-    Compute class-level analytics in-process (no LLM yet; LLM narrative is
-    added in Phase 5). Stores the result in ``analytics_reports`` and returns
+    Compute class-level metrics deterministically and enrich them with
+    evidence-bound recommendations. Stores the result in ``analytics_reports`` and returns
     the computed dict.
     """
     if assignment_id:
@@ -110,6 +112,8 @@ def _build_class_analytics(
 
     # Aggregate topic scores
     topic_totals: dict[str, list[float]] = {}
+    student_topic_totals: dict[uuid.UUID, dict[str, list[float]]] = {}
+    overall_rubric_scores: list[float] = []
     grade_dist: dict[str, int] = {"A": 0, "B": 0, "C": 0, "D": 0, "F": 0}
     all_scores: list[float] = []
     student_score_map: dict[uuid.UUID, list[float]] = {}
@@ -131,7 +135,16 @@ def _build_class_analytics(
                 score = float(entry.get("score", entry.get("points_awarded", 0)))
                 max_val = float(entry.get("max_points", entry.get("max_score", 10)))
                 topic_pct = (score / max_val * 100) if max_val > 0 else 0.0
+                if str(topic).strip().casefold() == "overall":
+                    overall_rubric_scores.append(topic_pct)
+                    continue
                 topic_totals.setdefault(topic, []).append(topic_pct)
+                student_topic_totals.setdefault(sub.student_id, {}).setdefault(topic, []).append(topic_pct)
+
+    overall_rubric_pct = (
+        round(sum(overall_rubric_scores) / len(overall_rubric_scores), 2)
+        if overall_rubric_scores else None
+    )
 
     # Compute weak topics (average mastery < 60%)
     weak_topics = []
@@ -141,7 +154,8 @@ def _build_class_analytics(
             weak_topics.append({"topic": topic, "average_mastery_pct": round(avg, 2)})
     weak_topics.sort(key=lambda x: x["average_mastery_pct"])
 
-    # At-risk students: average < 40% or zero graded submissions
+    # At-risk students: low average, multiple class-wide weak topics, or a
+    # missing submission for an assignment whose deadline has passed.
     enrolled_students = (
         db.query(User)
         .join(Enrollment, Enrollment.student_id == User.id)
@@ -149,27 +163,67 @@ def _build_class_analytics(
         .all()
     )
     at_risk = []
+    overdue_assignments = [item for item in assignments if _assignment_deadline_passed(item)]
     for student in enrolled_students:
         scores = student_score_map.get(student.id, [])
         avg = sum(scores) / len(scores) if scores else 0.0
-        if not scores or avg < 40:
+        student_submissions = (
+            db.query(Submission)
+            .filter(
+                Submission.assignment_id.in_([item.id for item in overdue_assignments]),
+                Submission.student_id == student.id,
+            )
+            .all()
+        ) if overdue_assignments else []
+        submitted_ids = {item.assignment_id for item in student_submissions}
+        missing_count = sum(1 for item in overdue_assignments if item.id not in submitted_ids)
+        student_topics = student_topic_totals.get(student.id, {})
+        weak_topic_count = sum(
+            1 for values in student_topics.values()
+            if values and sum(values) / len(values) < 60
+        )
+        reasons = []
+        if scores and avg < 40:
+            reasons.append("low_score")
+        if missing_count:
+            reasons.append("missing_submissions")
+        if weak_topic_count >= 2:
+            reasons.append("multiple_weak_topics")
+        if reasons:
             at_risk.append(
                 {
                     "student_id": str(student.id),
                     "student_name": student.full_name,
                     "average_pct": round(avg, 2),
                     "submissions_graded": len(scores),
-                    "reason": "no_submissions" if not scores else "low_score",
+                    "missing_overdue": missing_count,
+                    "reason": reasons,
                 }
             )
 
     report_type = "topic_gap" if assignment_id else "class_summary"
-    narrative = (
+    factual_summary = (
         f"Class analytics for {course.name}. "
         f"{len(submissions)} graded submissions across {len(assignments)} assignment(s). "
         f"Weak topics: {[t['topic'] for t in weak_topics[:3]] or 'None identified'}. "
         f"At-risk students: {len(at_risk)}."
     )
+    if overall_rubric_pct is not None:
+        factual_summary += (
+            f" Overall rubric average: {overall_rubric_pct}%."
+            " This is an aggregate rubric score, not a topic-level result."
+        )
+    recommendations = generate_class_recommendations(
+        {
+            "weak_topics": weak_topics,
+            "at_risk_students": at_risk,
+            "grade_distribution": grade_dist,
+            "graded_submissions": len(submissions),
+            "assignment_count": len(assignments),
+            "overall_rubric_pct": overall_rubric_pct,
+        }
+    )
+    narrative = f"{factual_summary}\n\nTeaching recommendations: {recommendations}"
 
     # Persist / update the report
     existing = (
@@ -187,6 +241,9 @@ def _build_class_analytics(
         existing.at_risk_students = at_risk
         existing.narrative = narrative
         existing.grade_distribution = grade_dist
+        # This timestamp represents the latest report refresh. The worker's
+        # deadline sweep uses it to avoid rerunning the same analysis forever.
+        existing.created_at = datetime.now(timezone.utc)
         db.commit()
         db.refresh(existing)
         return _report_payload(existing)
@@ -279,8 +336,8 @@ def get_assignment_analytics(
     assignment = _get_assignment_or_404(db, assignment_id)
     if assignment.course_id != course_id:
         raise HTTPException(status_code=404, detail="Assignment not found in this course")
-    if current_user.id != course.faculty_id and not _assignment_deadline_passed(assignment):
-        return {"status": "awaiting_release", "assignment_id": str(assignment_id)}
+    if current_user.id != course.faculty_id:
+        raise HTTPException(status_code=403, detail="Assignment analytics are available to the teacher only")
 
     if not refresh:
         cached = (
@@ -339,8 +396,20 @@ def get_progress_report(
         raise HTTPException(status_code=403, detail="No access to this course")
 
     if current_user.id != course.faculty_id:
-        # Recompute for students so cached reports cannot reveal pre-deadline grades.
-        return _compute_and_save_progress_report(db, course, current_user)
+        # Reports only include assignments whose deadlines have passed. Serve
+        # the stored version here; students explicitly refresh from the UI.
+        report = (
+            db.query(ProgressReport)
+            .filter(
+                ProgressReport.student_id == current_user.id,
+                ProgressReport.course_id == course_id,
+            )
+            .order_by(ProgressReport.created_at.desc())
+            .first()
+        )
+        if not report:
+            raise HTTPException(status_code=404, detail="No progress report found. Generate one from the Grades tab.")
+        return _progress_report_payload(report)
 
     report = (
         db.query(ProgressReport)
@@ -355,7 +424,7 @@ def get_progress_report(
         # Auto-generate if none exists
         if current_user.id == course.faculty_id:
             raise HTTPException(status_code=404, detail="No progress report found")
-        return _compute_and_save_progress_report(db, course, current_user)
+        raise HTTPException(status_code=404, detail="No progress report found")
 
     return _progress_report_payload(report)
 
@@ -365,7 +434,10 @@ def _compute_and_save_progress_report(
 ) -> dict:
     """Compute the student's longitudinal progress across all assignments in the course."""
     assignments = (
-        db.query(Assignment).filter(Assignment.course_id == course.id).all()
+        db.query(Assignment)
+        .filter(Assignment.course_id == course.id)
+        .order_by(Assignment.due_date.asc(), Assignment.id.asc())
+        .all()
     )
     assignments = [assignment for assignment in assignments if _assignment_deadline_passed(assignment)]
     assignment_ids = [a.id for a in assignments]
@@ -380,12 +452,46 @@ def _compute_and_save_progress_report(
         .order_by(Submission.created_at.asc())
         .all()
     ) if assignment_ids else []
+    all_student_submissions = (
+        db.query(Submission)
+        .filter(
+            Submission.assignment_id.in_(assignment_ids),
+            Submission.student_id == student.id,
+        )
+        .all()
+    ) if assignment_ids else []
 
     # Build mastery snapshot per topic across all graded submissions
     topic_scores: dict[str, list[float]] = {}
     trajectory: list[dict] = []
 
-    for sub in submissions:
+    submissions_by_assignment = {sub.assignment_id: sub for sub in all_student_submissions}
+    for assignment in assignments:
+        sub = submissions_by_assignment.get(assignment.id)
+        if sub is None:
+            trajectory.append(
+                {
+                    "assignment_id": str(assignment.id),
+                    "assignment_title": assignment.title,
+                    "score_pct": 0.0,
+                    "mastery_level": "No submission",
+                    "status": "missing",
+                    "submitted_at": None,
+                }
+            )
+            continue
+        if sub.status != "graded":
+            trajectory.append(
+                {
+                    "assignment_id": str(assignment.id),
+                    "assignment_title": assignment.title,
+                    "score_pct": None,
+                    "mastery_level": "Under review" if sub.status == "flagged" else "Evaluation in progress",
+                    "status": sub.status,
+                    "submitted_at": sub.created_at.isoformat() if sub.created_at else None,
+                }
+            )
+            continue
         assignment = next((a for a in assignments if a.id == sub.assignment_id), None)
         max_marks = float(assignment.max_marks) if assignment and assignment.max_marks else 100.0
         eff = float(sub.final_score if sub.final_score is not None else (sub.ai_score or 0.0))
@@ -396,6 +502,7 @@ def _compute_and_save_progress_report(
                 "assignment_title": assignment.title if assignment else "Unknown",
                 "score_pct": round(pct, 2),
                 "mastery_level": sub.mastery_level,
+                "status": sub.status,
                 "submitted_at": sub.created_at.isoformat() if sub.created_at else None,
             }
         )
@@ -444,26 +551,34 @@ def _compute_and_save_progress_report(
                     else (submission.ai_score or 0.0)
                 )
                 scores.append((effective / max_marks) * 100 if max_marks > 0 else 0.0)
-            else:
+            elif submission is None:
+                # A genuine missing overdue submission counts as zero. Work
+                # held for integrity review is not scored until the teacher acts.
                 scores.append(0.0)
-        return sum(scores) / len(assignments)
+        return sum(scores) / len(scores) if scores else 0.0
 
     ranked = sorted(enrolled_students, key=lambda u: -_student_avg(u.id))
     rank = next((i + 1 for i, u in enumerate(ranked) if u.id == student.id), None)
 
     student_avg = _student_avg(student.id)
-    trend = "improving" if len(trajectory) >= 2 and trajectory[-1]["score_pct"] > trajectory[0]["score_pct"] else "stable"
+    released_trajectory = [item for item in trajectory if item.get("status") in {"graded", "missing"}]
+    trend = "improving" if len(released_trajectory) >= 2 and released_trajectory[-1]["score_pct"] > released_trajectory[0]["score_pct"] else "stable"
 
-    narrative = (
-        f"{student.full_name}'s performance in {course.name}: "
-        f"{'No graded assignments yet.' if not trajectory else f'Average score: {round(student_avg, 1)}%. Trend: {trend}. '}"
-        f"{'Strong areas: ' + ', '.join([t for t, v in mastery_snapshot.items() if v >= 70]) if mastery_snapshot else ''}"
-        f"{'  Areas to improve: ' + ', '.join([t for t, v in mastery_snapshot.items() if v < 60]) if mastery_snapshot else ''}"
+    progress_result = generate_progress_narrative(
+        {
+            "average_score_pct": round(student_avg, 2),
+            "topic_mastery": mastery_snapshot,
+            "trajectory": released_trajectory,
+        }
     )
+    narrative = progress_result["narrative"]
 
     snapshot_with_trajectory = {
         "topic_mastery": mastery_snapshot,
         "trajectory": trajectory,
+        "average_score_pct": round(student_avg, 2),
+        "trend": progress_result.get("trend", trend),
+        "recommendations": progress_result.get("recommendations", []),
     }
 
     # Upsert progress report

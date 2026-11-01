@@ -12,6 +12,7 @@ import asyncio
 import logging
 from pathlib import Path
 import re
+from datetime import datetime, timezone
 from typing import Any
 import uuid
 
@@ -38,8 +39,11 @@ logger = logging.getLogger("vidyaranya.worker")
 _legacy_grade = grade
 
 try:
+    from arq import cron
     from arq.worker import Retry
 except ImportError:
+    cron = None
+
     class Retry(Exception):  # type: ignore
         def __init__(self, defer: int = 5) -> None:
             self.defer = defer
@@ -327,9 +331,19 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
 
         db.commit()
         db.refresh(submission)
-        # Refresh assignment-level analytics after a submission becomes graded.
-        if submission.status == "graded":
-            await queue_service.enqueue_class_analytics(assignment.id)
+        # Build assignment analytics once every submitted file has reached a
+        # terminal evaluation state. Teachers can refresh the class report on demand.
+        if submission.status in {"graded", "flagged"}:
+            unfinished_count = (
+                db.query(Submission)
+                .filter(
+                    Submission.assignment_id == assignment.id,
+                    Submission.status.in_(["pending_eval", "evaluating"]),
+                )
+                .count()
+            )
+            if unfinished_count == 0:
+                await queue_service.enqueue_class_analytics(assignment.id)
         logger.info(
             "Successfully evaluated submission %s: status=%s, ai_score=%.2f, mastery=%s",
             submission_id,
@@ -430,7 +444,8 @@ async def index_note_task(ctx: dict[str, Any], note_id: str) -> dict[str, Any]:
 
 async def generate_class_analytics_task(ctx: dict[str, Any], assignment_id: str) -> dict[str, Any]:
     """
-    Background Task: Aggregate class-level performance metrics for an assignment.
+    Background Task: Refresh course-level class metrics after an assignment's
+    submitted work has completed evaluation.
     """
     logger.info("Executing generate_class_analytics_task for assignment_id=%s", assignment_id)
     from app.api.analytics import _build_class_analytics
@@ -447,13 +462,93 @@ async def generate_class_analytics_task(ctx: dict[str, Any], assignment_id: str)
         if not course:
             return {"status": "course_not_found"}
 
-        report = _build_class_analytics(db, course, assignment_id=assignment.id)
-        logger.info("Successfully generated class analytics for assignment %s", assignment_id)
+        report = _build_class_analytics(db, course)
+        logger.info("Successfully generated course analytics after assignment %s", assignment_id)
         return {"status": "completed", "assignment_id": assignment_id, "report_id": str(report.get("id"))}
 
     except Exception as exc:
         logger.exception("Error generating class analytics for %s: %s", assignment_id, exc)
         raise exc
+    finally:
+        db.close()
+
+
+async def refresh_overdue_assignment_analytics_task(ctx: dict[str, Any]) -> dict[str, Any]:
+    """Refresh class analytics after due dates, including students who did not submit.
+
+    ARQ calls this periodically. It waits for submitted evaluations to finish,
+    then refreshes the class report only if it predates a passed deadline.
+    """
+    from app.api.analytics import _assignment_deadline_passed, _build_class_analytics
+
+    db: Session = SessionLocal()
+    refreshed: list[str] = []
+    waiting: list[str] = []
+    try:
+        now = datetime.now(timezone.utc)
+        assignments = db.query(Assignment).filter(Assignment.due_date.is_not(None)).all()
+        for assignment in assignments:
+            due_date = assignment.due_date
+            if due_date is None or not _assignment_deadline_passed(assignment):
+                continue
+            normalized_due_date = (
+                due_date.replace(tzinfo=timezone.utc)
+                if due_date.tzinfo is None
+                else due_date
+            )
+
+            active_evaluations = (
+                db.query(Submission)
+                .filter(
+                    Submission.assignment_id == assignment.id,
+                    Submission.status.in_(["pending_eval", "evaluating"]),
+                )
+                .count()
+            )
+            if active_evaluations:
+                waiting.append(str(assignment.id))
+                continue
+
+            latest_report = (
+                db.query(AnalyticsReport)
+                .filter(
+                    AnalyticsReport.course_id == assignment.course_id,
+                    AnalyticsReport.assignment_id.is_(None),
+                    AnalyticsReport.report_type == "class_summary",
+                )
+                .order_by(AnalyticsReport.created_at.desc())
+                .first()
+            )
+            report_time = latest_report.created_at if latest_report else None
+            if report_time is not None:
+                if report_time.tzinfo is None:
+                    report_time = report_time.replace(tzinfo=timezone.utc)
+                if report_time >= normalized_due_date:
+                    continue
+
+            course = db.query(Course).filter(Course.id == assignment.course_id).first()
+            if not course:
+                logger.warning("Course %s missing while refreshing deadline analytics", assignment.course_id)
+                continue
+
+            report = _build_class_analytics(db, course)
+            refreshed.append(str(assignment.id))
+            logger.info(
+                "Refreshed deadline analytics for assignment %s after due date %s (report %s)",
+                assignment.id,
+                due_date.isoformat(),
+                report.get("id"),
+            )
+
+        return {
+            "status": "completed",
+            "refreshed_assignments": refreshed,
+            "waiting_for_evaluations": waiting,
+            "checked_at": now.isoformat(),
+        }
+    except Exception:
+        logger.exception("Failed to refresh analytics for assignments past their deadlines")
+        raise
     finally:
         db.close()
 
@@ -479,3 +574,14 @@ class WorkerSettings:
     max_jobs = 1
     job_timeout = 900
     max_tries = settings.WORKER_MAX_RETRIES
+    cron_jobs = (
+        [
+            cron(
+                refresh_overdue_assignment_analytics_task,
+                minute={0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55},
+                run_at_startup=True,
+            )
+        ]
+        if cron is not None
+        else []
+    )
