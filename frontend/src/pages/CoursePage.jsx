@@ -1,6 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { Loader2, Megaphone, BookOpen, Users, BarChart3, ArrowLeft, Zap } from 'lucide-react';
+import { Loader2, Megaphone, BookOpen, Users, BarChart3, ArrowLeft } from 'lucide-react';
 import { useCourse } from '../context/CourseContext';
 import { useAuth } from '../context/AuthContext';
 import { notesApi } from '../api/client';
@@ -20,10 +20,11 @@ const TABS = [
 export default function CoursePage() {
   const { courseId } = useParams();
   const navigate = useNavigate();
-  const { courses, selectCourse, currentCourse, setCurrentCourse } = useCourse();
+  const { courses, currentCourse, setCurrentCourse } = useCourse();
   const { isFaculty } = useAuth();
   const [activeTab, setActiveTab] = useState('stream');
   const [notes, setNotes] = useState([]);
+  const hasUnindexedNotes = notes.some((note) => !note.chroma_indexed);
 
   // Resolve course from context or courses list
   useEffect(() => {
@@ -32,10 +33,29 @@ export default function CoursePage() {
   }, [courseId, courses, setCurrentCourse]);
 
   // Load notes for AI Tutor material selector
-  useEffect(() => {
+  const loadNotes = useCallback(async () => {
     if (!courseId) return;
-    notesApi.list(courseId).then((r) => setNotes(r.data || [])).catch(() => {});
+    const response = await notesApi.list(courseId);
+    setNotes(response.data || []);
   }, [courseId]);
+
+  useEffect(() => {
+    let active = true;
+    notesApi.list(courseId)
+      .then((response) => {
+        if (active) setNotes(response.data || []);
+      })
+      .catch(() => {});
+    return () => { active = false; };
+  }, [courseId]);
+
+  useEffect(() => {
+    if (!hasUnindexedNotes) return undefined;
+    const timer = window.setInterval(() => loadNotes().catch(() => {}), 4000);
+    return () => window.clearInterval(timer);
+  }, [hasUnindexedNotes, loadNotes]);
+
+  const handleNotesChanged = () => loadNotes().catch(() => {});
 
   if (!currentCourse && courses.length > 0) {
     // Course not found in user's list
@@ -108,14 +128,14 @@ export default function CoursePage() {
       <div className="flex-1 overflow-y-auto">
         <div className="max-w-5xl mx-auto px-6 lg:px-8 py-6">
           {activeTab === 'stream' && <StreamTab course={currentCourse} isFaculty={isFaculty} />}
-          {activeTab === 'classwork' && <ClassworkTab course={currentCourse} isFaculty={isFaculty} />}
+          {activeTab === 'classwork' && <ClassworkTab course={currentCourse} isFaculty={isFaculty} onNotesChanged={handleNotesChanged} />}
           {activeTab === 'people' && <PeopleTab course={currentCourse} />}
           {activeTab === 'grades' && <GradesAnalyticsTab course={currentCourse} />}
         </div>
       </div>
 
       {/* AI Tutor floating widget */}
-      <AiTutorWidget courseId={currentCourse.id} notes={notes} />
+      <AiTutorWidget key={currentCourse.id} courseId={currentCourse.id} notes={notes} />
     </div>
   );
 }

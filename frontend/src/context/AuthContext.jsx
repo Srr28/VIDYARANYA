@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import { authApi } from '../api/client';
 
 const AuthContext = createContext();
@@ -68,10 +68,11 @@ export const AuthProvider = ({ children }) => {
     window.location.href = authApi.getGoogleLoginUrl();
   };
 
-  const setAuthToken = (newToken) => {
+  const setAuthToken = useCallback((newToken) => {
     localStorage.setItem('vidyaranya_token', newToken);
+    setIsLoading(true);
     setToken(newToken);
-  };
+  }, []);
 
   const logout = async () => {
     try {

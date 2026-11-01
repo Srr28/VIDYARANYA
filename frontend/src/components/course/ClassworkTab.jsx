@@ -1,11 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import {
   FileText, Upload, Trash2, Download, Plus, Loader2, BookOpen,
-  ChevronDown, ChevronUp, Calendar, ClipboardList, Clock, CheckCircle2,
-  AlertTriangle, XCircle, Zap
+  ClipboardList, Clock, Paperclip, Eye, FileDown
 } from 'lucide-react';
 import { notesApi, assignmentsApi, submissionsApi } from '../../api/client';
-import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../common/Toast';
 import Modal from '../common/Modal';
 import MarkdownView from '../common/MarkdownView';
@@ -14,8 +12,24 @@ import MarkdownView from '../common/MarkdownView';
 
 function NoteItem({ note, isFaculty, onDelete }) {
   const { showToast } = useToast();
-  const handleDownload = () => {
-    window.open(notesApi.downloadUrl(note.id), '_blank');
+  const [downloading, setDownloading] = useState(false);
+  const handleDownload = async () => {
+    setDownloading(true);
+    try {
+      const response = await notesApi.download(note.id);
+      const objectUrl = URL.createObjectURL(response.data);
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.download = note.file_name || note.title || 'course-material';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    } catch (err) {
+      showToast(err.response?.data?.detail || 'Could not download this material.', 'error');
+    } finally {
+      setDownloading(false);
+    }
   };
   const handleDelete = async () => {
     try {
@@ -38,8 +52,8 @@ function NoteItem({ note, isFaculty, onDelete }) {
         </p>
       </div>
       <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-        <button onClick={handleDownload} className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 hover:text-blue-600 transition-colors" title="Download">
-          <Download className="w-4 h-4" />
+        <button onClick={handleDownload} disabled={downloading} className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 hover:text-blue-600 transition-colors disabled:opacity-60" title="Download">
+          {downloading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
         </button>
         {isFaculty && (
           <button onClick={handleDelete} className="p-1.5 rounded-lg hover:bg-red-50 dark:hover:bg-red-950/30 text-slate-500 hover:text-red-600 transition-colors" title="Delete">
@@ -51,7 +65,7 @@ function NoteItem({ note, isFaculty, onDelete }) {
   );
 }
 
-function NotesSection({ course, isFaculty }) {
+function NotesSection({ course, isFaculty, onNotesChanged }) {
   const [notes, setNotes] = useState([]);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
@@ -70,6 +84,7 @@ function NotesSection({ course, isFaculty }) {
       form.append('file', file);
       const res = await notesApi.uploadDirect(course.id, form);
       setNotes((prev) => [res.data, ...prev]);
+      onNotesChanged?.();
       showToast('Note uploaded!', 'success');
     } catch (err) {
       showToast(err.response?.data?.detail || 'Upload failed', 'error');
@@ -102,7 +117,10 @@ function NotesSection({ course, isFaculty }) {
       ) : (
         <div className="space-y-2">
           {notes.map((n) => (
-            <NoteItem key={n.id} note={n} isFaculty={isFaculty} onDelete={(id) => setNotes((prev) => prev.filter((x) => x.id !== id))} />
+            <NoteItem key={n.id} note={n} isFaculty={isFaculty} onDelete={(id) => {
+              setNotes((prev) => prev.filter((x) => x.id !== id));
+              onNotesChanged?.();
+            }} />
           ))}
         </div>
       )}
@@ -121,8 +139,8 @@ const STATUS_STYLES = {
   not_submitted: 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400',
 };
 
-function AssignmentCard({ assignment, isFaculty, onViewGrades, onSubmit }) {
-  const deadline = assignment.deadline ? new Date(assignment.deadline) : null;
+function AssignmentCard({ assignment, isFaculty, onViewGrades, onSubmit, onDetails }) {
+  const deadline = assignment.due_date ? new Date(assignment.due_date) : null;
   const isPast = deadline && deadline < new Date();
 
   return (
@@ -147,6 +165,12 @@ function AssignmentCard({ assignment, isFaculty, onViewGrades, onSubmit }) {
           )}
         </div>
         <div className="flex flex-col items-end gap-2 shrink-0">
+          <button
+            onClick={() => onDetails(assignment)}
+            className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-indigo-50 dark:bg-indigo-950/40 hover:bg-indigo-100 dark:hover:bg-indigo-950/70 text-indigo-700 dark:text-indigo-300 font-semibold transition-colors"
+          >
+            <Eye className="w-3.5 h-3.5" /> Details &amp; materials
+          </button>
           {isFaculty ? (
             <button
               onClick={() => onViewGrades(assignment)}
@@ -166,6 +190,136 @@ function AssignmentCard({ assignment, isFaculty, onViewGrades, onSubmit }) {
         </div>
       </div>
     </div>
+  );
+}
+
+function AssignmentDetailsModal({ assignment, isFaculty, onClose }) {
+  const [attachments, setAttachments] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [downloadingId, setDownloadingId] = useState(null);
+  const [uploadFiles, setUploadFiles] = useState([]);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState('');
+  const { showToast } = useToast();
+
+  useEffect(() => {
+    assignmentsApi.getAttachments(assignment.id)
+      .then((response) => setAttachments(response.data || []))
+      .catch((err) => setError(err.response?.data?.detail || 'Could not load assignment materials.'))
+      .finally(() => setLoading(false));
+  }, [assignment.id]);
+
+  const downloadAttachment = async (item) => {
+    setDownloadingId(item.id);
+    try {
+      const response = await assignmentsApi.downloadAttachment(item.id);
+      const objectUrl = URL.createObjectURL(response.data);
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.download = item.file_name || item.title || 'assignment-material';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Could not download this material.');
+    } finally {
+      setDownloadingId(null);
+    }
+  };
+
+  const uploadAttachments = async (event) => {
+    event.preventDefault();
+    if (!uploadFiles.length) return;
+    const uploadForm = event.currentTarget;
+    setUploading(true);
+    let failed = 0;
+    const added = [];
+    for (const file of uploadFiles) {
+      const form = new FormData();
+      form.append('file', file);
+      form.append('title', file.name);
+      try {
+        const response = await assignmentsApi.uploadAttachment(assignment.id, form);
+        added.push(response.data);
+      } catch {
+        failed += 1;
+      }
+    }
+    setAttachments((current) => [...added, ...current]);
+    setUploadFiles([]);
+    uploadForm.reset();
+    setUploading(false);
+    if (failed) showToast(`${added.length} file(s) added; ${failed} could not be uploaded. Check file type and 10 MB limit.`, 'warning');
+    else showToast('Assignment materials added.', 'success');
+  };
+
+  return (
+    <Modal title={`Assignment details: ${assignment.title}`} onClose={onClose} size="lg">
+      <div className="space-y-6">
+        {assignment.description && (
+          <section>
+            <h4 className="text-sm font-bold text-slate-800 dark:text-slate-100 mb-2">Instructions</h4>
+            <p className="text-sm text-slate-600 dark:text-slate-300 whitespace-pre-wrap">{assignment.description}</p>
+          </section>
+        )}
+        <section>
+          <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+            <div className="flex items-center gap-2">
+              <Paperclip className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+              <h4 className="text-sm font-bold text-slate-800 dark:text-slate-100">Assignment materials</h4>
+            </div>
+            {isFaculty && (
+              <form onSubmit={uploadAttachments} className="flex flex-wrap items-center gap-2">
+                <input type="file" multiple accept=".pdf,.docx,.txt,.md,.csv,.pptx,.xlsx,.png,.jpg,.jpeg" onChange={(event) => setUploadFiles(Array.from(event.target.files || []))} className="max-w-56 text-xs text-slate-600 dark:text-slate-300" />
+                <button type="submit" disabled={!uploadFiles.length || uploading} className="flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50">
+                  {uploading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Upload className="w-3.5 h-3.5" />}
+                  Add files
+                </button>
+              </form>
+            )}
+          </div>
+          {loading ? (
+            <div className="flex justify-center py-4"><Loader2 className="w-5 h-5 animate-spin text-blue-500" /></div>
+          ) : attachments.length === 0 ? (
+            <p className="text-sm text-slate-400">The teacher has not attached any files.</p>
+          ) : (
+            <div className="space-y-2">
+              {attachments.map((item) => (
+                <div key={item.id} className="flex items-center justify-between gap-3 rounded-xl border border-slate-200 dark:border-slate-700 p-3">
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-slate-800 dark:text-slate-200 truncate">{item.title}</p>
+                    <p className="text-xs text-slate-500 truncate">{item.file_name}</p>
+                  </div>
+                  <button
+                    onClick={() => downloadAttachment(item)}
+                    disabled={downloadingId === item.id}
+                    className="shrink-0 flex items-center gap-1.5 rounded-lg bg-blue-50 dark:bg-blue-950/40 px-3 py-2 text-xs font-semibold text-blue-700 dark:text-blue-300 disabled:opacity-60"
+                  >
+                    {downloadingId === item.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <FileDown className="w-3.5 h-3.5" />}
+                    Download
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+        {assignment.rubric?.length > 0 && (
+          <section>
+            <h4 className="text-sm font-bold text-slate-800 dark:text-slate-100 mb-2">Grading rubric</h4>
+            <div className="divide-y divide-slate-200 dark:divide-slate-700 rounded-xl border border-slate-200 dark:border-slate-700">
+              {assignment.rubric.map((criterion, index) => (
+                <div key={`${criterion.criterion}-${index}`} className="flex justify-between gap-4 p-3 text-sm">
+                  <span className="text-slate-700 dark:text-slate-300">{criterion.criterion}</span>
+                  <span className="shrink-0 font-semibold text-slate-600 dark:text-slate-300">{criterion.max_points} pts</span>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+        {error && <p role="alert" className="text-sm text-rose-600 dark:text-rose-400">{error}</p>}
+      </div>
+    </Modal>
   );
 }
 
@@ -235,14 +389,15 @@ function SubmissionsModal({ assignment, onClose }) {
   const [overrideScore, setOverrideScore] = useState('');
   const [overrideNote, setOverrideNote] = useState('');
   const [savingOverride, setSavingOverride] = useState(false);
+  const [downloadingId, setDownloadingId] = useState(null);
   const { showToast } = useToast();
 
   useEffect(() => {
     submissionsApi.byAssignment(assignment.id)
-      .then((r) => setSubmissions(r.data || []))
-      .catch(() => {})
+      .then((r) => setSubmissions(Array.isArray(r.data) ? r.data : r.data?.submissions || []))
+      .catch((err) => showToast(err.response?.data?.detail || 'Could not load submissions', 'error'))
       .finally(() => setLoading(false));
-  }, [assignment.id]);
+  }, [assignment.id, showToast]);
 
   const handleOverride = async (sub) => {
     setSavingOverride(true);
@@ -251,13 +406,32 @@ function SubmissionsModal({ assignment, onClose }) {
         final_score: parseFloat(overrideScore),
         faculty_note: overrideNote,
       });
-      setSubmissions((prev) => prev.map((s) => (s.id === sub.id ? res.data : s)));
+      setSubmissions((prev) => prev.map((s) => (s.id === sub.id ? { ...s, ...res.data } : s)));
       setOverriding(null);
       showToast('Grade overridden!', 'success');
     } catch {
       showToast('Failed to override grade', 'error');
     } finally {
       setSavingOverride(false);
+    }
+  };
+
+  const handleDownload = async (sub) => {
+    setDownloadingId(sub.id);
+    try {
+      const response = await submissionsApi.downloadFile(sub.id);
+      const objectUrl = URL.createObjectURL(response.data);
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.download = sub.file_name || 'student-submission';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    } catch (err) {
+      showToast(err.response?.data?.detail || 'Could not download submission', 'error');
+    } finally {
+      setDownloadingId(null);
     }
   };
 
@@ -280,31 +454,37 @@ function SubmissionsModal({ assignment, onClose }) {
                   <span className={`text-xs px-2.5 py-1 rounded-full font-semibold ${STATUS_STYLES[sub.status] || STATUS_STYLES.not_submitted}`}>
                     {sub.status?.replace('_', ' ') || 'Not submitted'}
                   </span>
-                  {sub.status === 'graded' && (
+                  {(sub.final_score != null || sub.ai_score != null) && (
                     <span className="text-sm font-bold text-slate-800 dark:text-slate-200">
                       {sub.final_score ?? sub.ai_score}/{assignment.max_marks}
                     </span>
                   )}
                 </div>
               </div>
-              {sub.mastery_level && (
+              {sub.mastery_level && sub.integrity_score != null && (
                 <p className="text-xs text-slate-500">Mastery: <strong>{sub.mastery_level}</strong> · Integrity: {(sub.integrity_score * 100).toFixed(0)}%</p>
               )}
               <div className="flex items-center gap-2">
-                {sub.file_key && (
-                  <a href={submissionsApi.downloadUrl(sub.id)} target="_blank" rel="noreferrer" className="text-xs text-blue-600 dark:text-blue-400 hover:underline flex items-center gap-1">
-                    <Download className="w-3.5 h-3.5" /> Download
-                  </a>
+                {sub.file_name && (
+                  <button onClick={() => handleDownload(sub)} disabled={downloadingId === sub.id} className="text-xs text-blue-600 dark:text-blue-400 hover:underline flex items-center gap-1 disabled:opacity-60">
+                    {downloadingId === sub.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />} Download {sub.file_name}
+                  </button>
                 )}
-                {sub.status === 'graded' && (
+                {sub.file_name && (
                   <button
-                    onClick={() => { setOverriding(sub); setOverrideScore(sub.final_score ?? sub.ai_score ?? ''); setOverrideNote(sub.faculty_note || ''); }}
+                    onClick={() => { setOverriding(sub); setOverrideScore(sub.final_score ?? sub.ai_score ?? ''); setOverrideNote(sub.faculty_note || sub.teacher_comment || ''); }}
                     className="text-xs text-purple-600 dark:text-purple-400 hover:underline"
                   >
-                    Override Grade
+                    {sub.status === 'graded' ? 'Override Grade' : 'Enter Grade'}
                   </button>
                 )}
               </div>
+              {sub.feedback_text && (
+                <div className="border-t border-slate-200 dark:border-slate-700 pt-2">
+                  <p className="text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">AI grading feedback</p>
+                  <MarkdownView content={sub.feedback_text} />
+                </div>
+              )}
               {/* Override form inline */}
               {overriding?.id === sub.id && (
                 <div className="mt-2 p-3 rounded-xl bg-purple-50 dark:bg-purple-950/30 border border-purple-200 dark:border-purple-800 space-y-2">
@@ -349,30 +529,61 @@ function SubmissionsModal({ assignment, onClose }) {
 
 function CreateAssignmentModal({ course, onClose, onCreated }) {
   const [form, setForm] = useState({
-    title: '', description: '', deadline: '', max_marks: 100, ai_eval_enabled: true,
-    topics_list: '',
+    title: '', description: '', due_date: '', max_marks: 100, ai_eval_enabled: true,
+    topics_list: '', private_reference_solution: '',
   });
+  const [rubric, setRubric] = useState([]);
+  const [files, setFiles] = useState([]);
   const [loading, setLoading] = useState(false);
   const { showToast } = useToast();
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    const maxMarks = Number(form.max_marks);
+    const rubricTotal = rubric.reduce((total, item) => total + Number(item.max_points || 0), 0);
+    if (rubric.length && Math.abs(rubricTotal - maxMarks) > 0.001) {
+      showToast(`Rubric points must total ${maxMarks}. Current total: ${rubricTotal}.`, 'error');
+      return;
+    }
     setLoading(true);
+    let created;
     try {
       const payload = {
-        ...form,
-        max_marks: parseInt(form.max_marks),
+        title: form.title,
+        description: form.description,
+        due_date: form.due_date ? new Date(form.due_date).toISOString() : null,
+        max_marks: maxMarks,
+        ai_eval_enabled: form.ai_eval_enabled,
+        rubric: rubric.map((item) => ({ criterion: item.criterion.trim(), max_points: Number(item.max_points) })),
+        private_reference_solution: form.private_reference_solution,
         topics_list: form.topics_list ? form.topics_list.split(',').map((t) => t.trim()).filter(Boolean) : [],
       };
-      const res = await assignmentsApi.create(course.id, payload);
-      onCreated(res.data);
-      showToast('Assignment created!', 'success');
-      onClose();
+      created = await assignmentsApi.create(course.id, payload);
     } catch (err) {
       showToast(err.response?.data?.detail || 'Failed to create', 'error');
-    } finally {
       setLoading(false);
+      return;
     }
+
+    let failedUploads = 0;
+    for (const file of files) {
+      const attachment = new FormData();
+      attachment.append('file', file);
+      attachment.append('title', file.name);
+      try {
+        await assignmentsApi.uploadAttachment(created.data.id, attachment);
+      } catch {
+        failedUploads += 1;
+      }
+    }
+    onCreated(created.data);
+    if (failedUploads) {
+      showToast(`Assignment created, but ${failedUploads} file(s) could not be attached. Open the assignment and retry.`, 'warning');
+    } else {
+      showToast('Assignment created with its materials and grading settings.', 'success');
+    }
+    setLoading(false);
+    onClose();
   };
 
   return (
@@ -389,16 +600,49 @@ function CreateAssignmentModal({ course, onClose, onCreated }) {
         <div className="grid grid-cols-2 gap-4">
           <div>
             <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Deadline</label>
-            <input id="asgn-deadline" type="datetime-local" value={form.deadline} onChange={(e) => setForm({ ...form, deadline: e.target.value })} className="w-full px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm" />
+            <input id="asgn-deadline" type="datetime-local" value={form.due_date} onChange={(e) => setForm({ ...form, due_date: e.target.value })} className="w-full px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm" />
           </div>
           <div>
             <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Max Marks</label>
-            <input id="asgn-marks" type="number" value={form.max_marks} onChange={(e) => setForm({ ...form, max_marks: e.target.value })} className="w-full px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm" />
+            <input id="asgn-marks" type="number" min="1" required value={form.max_marks} onChange={(e) => setForm({ ...form, max_marks: e.target.value })} className="w-full px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm" />
           </div>
         </div>
         <div>
           <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Topics (comma-separated)</label>
           <input id="asgn-topics" type="text" value={form.topics_list} onChange={(e) => setForm({ ...form, topics_list: e.target.value })} className="w-full px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm" placeholder="e.g. Trees, Graphs, Dynamic Programming" />
+        </div>
+        <div>
+          <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Assignment files</label>
+          <input type="file" multiple accept=".pdf,.docx,.txt,.md,.csv,.pptx,.xlsx,.png,.jpg,.jpeg" onChange={(e) => setFiles(Array.from(e.target.files || []))} className="w-full text-sm text-slate-700 dark:text-slate-300 file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border-0 file:font-semibold file:bg-indigo-50 file:text-indigo-700" />
+          <p className="text-xs text-slate-500 mt-1">Students can view and download these files from assignment details. Maximum 10 MB per file.</p>
+          {files.length > 0 && (
+            <ul className="mt-2 space-y-1 text-xs text-indigo-600 dark:text-indigo-300">
+              {files.map((file) => <li key={`${file.name}-${file.lastModified}`} className="truncate">{file.name}</li>)}
+            </ul>
+          )}
+        </div>
+        <section className="space-y-3 rounded-xl border border-slate-200 dark:border-slate-700 p-4">
+          <div className="flex items-center justify-between gap-2">
+            <div>
+              <h4 className="text-sm font-semibold text-slate-800 dark:text-slate-100">Grading rubric</h4>
+              <p className="text-xs text-slate-500">Optional. If added, criterion points must total the maximum marks ({form.max_marks}).</p>
+            </div>
+            <button type="button" onClick={() => setRubric((items) => [...items, { criterion: '', max_points: '10' }])} className="flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-indigo-700 bg-indigo-50 dark:bg-indigo-950/40 dark:text-indigo-300">
+              <Plus className="w-3.5 h-3.5" /> Add criterion
+            </button>
+          </div>
+          {rubric.map((item, index) => (
+            <div key={index} className="flex items-center gap-2">
+              <input aria-label={`Rubric criterion ${index + 1}`} required value={item.criterion} onChange={(e) => setRubric((items) => items.map((row, i) => i === index ? { ...row, criterion: e.target.value } : row))} placeholder="Criterion, e.g. Correct reasoning" className="min-w-0 flex-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2 text-sm" />
+              <input aria-label="Criterion points" type="number" min="0" step="0.5" value={item.max_points} onChange={(e) => setRubric((items) => items.map((row, i) => i === index ? { ...row, max_points: e.target.value } : row))} className="w-24 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2 text-sm" />
+              <button type="button" onClick={() => setRubric((items) => items.filter((_, i) => i !== index))} aria-label="Remove rubric criterion" className="rounded-lg p-2 text-slate-400 hover:text-rose-600"><Trash2 className="w-4 h-4" /></button>
+            </div>
+          ))}
+          {rubric.length > 0 && <p className="text-xs text-slate-500">Total: {rubric.reduce((total, item) => total + Number(item.max_points || 0), 0)} / {form.max_marks}</p>}
+        </section>
+        <div>
+          <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Private reference solution (teacher and grading system only)</label>
+          <textarea maxLength={5000} rows={4} value={form.private_reference_solution} onChange={(e) => setForm({ ...form, private_reference_solution: e.target.value })} className="w-full px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white text-sm resize-y" placeholder="Add an answer key or reference solution. Students will not be able to see it." />
         </div>
         <label className="flex items-center gap-3 cursor-pointer">
           <input type="checkbox" checked={form.ai_eval_enabled} onChange={(e) => setForm({ ...form, ai_eval_enabled: e.target.checked })} className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500" />
@@ -416,12 +660,13 @@ function CreateAssignmentModal({ course, onClose, onCreated }) {
   );
 }
 
-export default function ClassworkTab({ course, isFaculty }) {
+export default function ClassworkTab({ course, isFaculty, onNotesChanged }) {
   const [assignments, setAssignments] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
   const [submittingFor, setSubmittingFor] = useState(null);
   const [viewingGrades, setViewingGrades] = useState(null);
+  const [viewingDetails, setViewingDetails] = useState(null);
 
   useEffect(() => {
     assignmentsApi.list(course.id)
@@ -434,7 +679,7 @@ export default function ClassworkTab({ course, isFaculty }) {
     <div className="space-y-8">
       {/* Notes */}
       <div className="bg-slate-50 dark:bg-slate-900/50 rounded-2xl border border-slate-200 dark:border-slate-800 p-5">
-        <NotesSection course={course} isFaculty={isFaculty} />
+        <NotesSection course={course} isFaculty={isFaculty} onNotesChanged={onNotesChanged} />
       </div>
 
       {/* Assignments */}
@@ -473,6 +718,7 @@ export default function ClassworkTab({ course, isFaculty }) {
                 isFaculty={isFaculty}
                 onSubmit={(asgn) => setSubmittingFor(asgn)}
                 onViewGrades={(asgn) => setViewingGrades(asgn)}
+                onDetails={(asgn) => setViewingDetails(asgn)}
               />
             ))}
           </div>
@@ -482,6 +728,7 @@ export default function ClassworkTab({ course, isFaculty }) {
       {showCreate && <CreateAssignmentModal course={course} onClose={() => setShowCreate(false)} onCreated={(a) => setAssignments((prev) => [a, ...prev])} />}
       {submittingFor && <SubmitModal assignment={submittingFor} onClose={() => setSubmittingFor(null)} onSubmitted={() => {}} />}
       {viewingGrades && <SubmissionsModal assignment={viewingGrades} onClose={() => setViewingGrades(null)} />}
+      {viewingDetails && <AssignmentDetailsModal assignment={viewingDetails} isFaculty={isFaculty} onClose={() => setViewingDetails(null)} />}
     </div>
   );
 }

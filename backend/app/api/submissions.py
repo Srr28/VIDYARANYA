@@ -522,6 +522,8 @@ def list_submissions_for_assignment(
                 "id": item.id,
                 "assignment_id": item.assignment_id,
                 "student_id": item.student_id,
+                "student_name": item.student.name,
+                "student_email": item.student.email,
                 "status": item.status,
                 "file_name": _submitted_file_name(item),
                 "ai_score": item.ai_score,

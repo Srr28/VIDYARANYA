@@ -116,7 +116,8 @@ export const notesApi = {
     apiClient.post(`/notes/upload?course_id=${courseId}`, formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
     }),
-  downloadUrl: (noteId) => `${API_URL}/notes/${noteId}/download`,
+  download: (noteId) =>
+    apiClient.get(`/notes/${noteId}/download`, { responseType: 'blob' }),
   delete: (noteId) => apiClient.delete(`/notes/${noteId}`),
 };
 
@@ -135,10 +136,14 @@ export const assignmentsApi = {
     apiClient.post(`/assignments/${assignmentId}/attachments`, formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
     }),
+  downloadAttachment: (attachmentId) =>
+    apiClient.get(`/assignments/attachments/${attachmentId}/download`, { responseType: 'blob' }),
 };
 
 export const submissionsApi = {
   byAssignment: (assignmentId) => apiClient.get(`/submissions/by-assignment/${assignmentId}`),
+  downloadFile: (submissionId) =>
+    apiClient.get(`/submissions/${submissionId}/download`, { responseType: 'blob' }),
   mySubmissions: (assignmentId) => apiClient.get(`/submissions/by-assignment/${assignmentId}/mine`),
   presign: (assignmentId, filename, contentType = 'application/pdf') =>
     apiClient.post(`/assignments/${assignmentId}/submit/presign`, { filename, content_type: contentType }),

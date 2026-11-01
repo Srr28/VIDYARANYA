@@ -1,5 +1,6 @@
 import uuid
 import json
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -14,8 +15,51 @@ from app.models.note import Note
 from app.models.user import User
 from app.schemas.chat import ChatRequest, ChatResponse
 from app.services.rag_service import chat as rag_chat, stream_chat as rag_stream_chat
+from app.services.rag_service import CHROMA_CLIENT, index_note
+from app.services.ocr_service import extract_text_from_bytes
+from app.services.storage_service import storage_service
 
 router = APIRouter(tags=["chat"])
+logger = logging.getLogger(__name__)
+
+
+def _repair_missing_note_indexes(db: Session, course_id: uuid.UUID, note_ids: list[uuid.UUID]) -> dict[str, str]:
+    """Rebuild missing vectors and retain extracted text as a retrieval fallback."""
+    material_texts: dict[str, str] = {}
+    try:
+        collection = CHROMA_CLIENT.get_or_create_collection(name=f"course_{course_id}")
+    except Exception:
+        logger.exception("Could not open Chroma collection for course %s", course_id)
+        collection = None
+
+    notes = db.query(Note).filter(Note.course_id == course_id, Note.id.in_(note_ids)).all()
+    for note in notes:
+        note_id = str(note.id)
+        try:
+            if collection is not None:
+                try:
+                    existing = collection.get(where={"note_id": note_id}, include=["documents", "metadatas"])
+                except Exception:
+                    logger.exception("Could not check Chroma chunks for note %s", note_id)
+                    existing = {}
+                if any(str(text or "").strip() for text in existing.get("documents", [])):
+                    continue
+
+            content = storage_service.download_file_bytes(note.file_key)
+            extracted_text = extract_text_from_bytes(content, filename=note.file_key)
+            if not extracted_text.strip():
+                logger.warning("Selected note %s has no extractable text", note_id)
+                continue
+
+            material_texts[note_id] = extracted_text
+            index_note(course_id=str(course_id), text=extracted_text, note_id=note_id)
+            note.chroma_indexed = True
+            note.chunk_count = max(1, len(extracted_text.split()) // 100)
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception("Could not repair missing Chroma index for note %s", note_id)
+    return material_texts
 
 
 @router.post("/chat", response_model=ChatResponse)
@@ -57,6 +101,10 @@ def chat_with_course_notes(
         if missing:
             raise HTTPException(status_code=404, detail="One or more selected materials were not found in this course")
 
+        material_texts = _repair_missing_note_indexes(db, payload.course_id, selected_note_ids)
+    else:
+        material_texts = {}
+
     if "text/event-stream" in request.headers.get("accept", ""):
         def event_stream():
             answer_parts: list[str] = []
@@ -66,6 +114,7 @@ def chat_with_course_notes(
                     course_id=str(payload.course_id),
                     question=payload.message,
                     note_ids=[str(n) for n in selected_note_ids],
+                    material_texts=material_texts,
                 ):
                     if item.get("type") == "token":
                         answer_parts.append(item["content"])
@@ -90,6 +139,7 @@ def chat_with_course_notes(
         course_id=str(payload.course_id),
         question=payload.message,
         note_ids=[str(n) for n in selected_note_ids],
+        material_texts=material_texts,
     )
 
     history = ChatMessage(

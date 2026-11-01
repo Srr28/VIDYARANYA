@@ -36,7 +36,20 @@ MODEL = (
     if SentenceTransformer is not None
     else FallbackEmbedder()
 )
-CHROMA_CLIENT = chromadb.PersistentClient(path=str(Path("./chroma_db")))
+
+
+def _chroma_storage_path() -> Path:
+    """Resolve one shared Chroma directory for local and container processes."""
+    module_path = Path(__file__).resolve()
+    for parent in module_path.parents:
+        if (parent / "docker-compose.yml").is_file():
+            return parent / "chroma_db"
+    # In the container, the repository root is not mounted, but the Compose
+    # volume is mounted at /app/chroma_db and the service runs from /app.
+    return Path.cwd() / "chroma_db"
+
+
+CHROMA_CLIENT = chromadb.PersistentClient(path=str(_chroma_storage_path()))
 
 
 def _call_groq_chat(messages: list[dict[str, str]]) -> str | None:
@@ -220,7 +233,28 @@ def _fallback_selected_material_chunks(collection, note_ids: list[str], question
     return selected, selected_meta
 
 
-def chat(course_id: int | str, question: str, note_ids: list[int | str] | None = None) -> dict[str, list[str] | str]:
+def _chunks_from_extracted_materials(
+    material_texts: dict[str, str], note_ids: list[str], question: str, max_chunks: int = 8
+) -> tuple[list[str], list[dict]]:
+    question_tokens = _tokenize(question)
+    ranked: list[tuple[int, str, dict]] = []
+    for note_id in note_ids:
+        for chunk in _chunk_text(material_texts.get(note_id, "")):
+            if chunk.strip():
+                text = chunk.strip()
+                score = len(question_tokens.intersection(_tokenize(text)))
+                ranked.append((score, text, {"source": f"note:{note_id}", "note_id": note_id}))
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    selected = ranked[:max_chunks]
+    return [item[1] for item in selected], [item[2] for item in selected]
+
+
+def chat(
+    course_id: int | str,
+    question: str,
+    note_ids: list[int | str] | None = None,
+    material_texts: dict[str, str] | None = None,
+) -> dict[str, list[str] | str]:
     selected_note_ids = sorted({str(note_id) for note_id in (note_ids or []) if note_id})
 
     if not selected_note_ids:
@@ -233,25 +267,23 @@ def chat(course_id: int | str, question: str, note_ids: list[int | str] | None =
     try:
         collection = CHROMA_CLIENT.get_collection(name=collection_name)
     except Exception:
-        return {
-            "answer": "I could not find indexed content for the selected materials. Try selecting different materials or use general chat.",
-            "sources": [],
-        }
+        collection = None
 
-    query_embedding = _encode_texts([question])
-    documents, metadatas = _query_selected_material_chunks(collection, query_embedding, selected_note_ids)
+    documents: list[str] = []
+    metadatas: list[dict] = []
+    if collection is not None:
+        query_embedding = _encode_texts([question])
+        documents, metadatas = _query_selected_material_chunks(collection, query_embedding, selected_note_ids)
 
-    if not documents:
+    if collection is not None and not documents:
         documents, metadatas = _fallback_selected_material_chunks(collection, selected_note_ids, question)
 
+    if not documents and material_texts:
+        documents, metadatas = _chunks_from_extracted_materials(material_texts, selected_note_ids, question)
+
     if not documents:
-        general = _general_chat(question)
         return {
-            "answer": (
-                "I could not read enough indexed text from the selected materials, so I am giving a general explanation.\n\n"
-                f"{general}\n\n"
-                "Tip: Upload text-based PDF/DOCX/TXT files for stronger material-grounded answers."
-            ),
+            "answer": "I could not find readable indexed text in the selected material. Check that indexing has finished, then try again or select another material.",
             "sources": [f"note:{note_id}" for note_id in selected_note_ids],
         }
 
@@ -300,15 +332,24 @@ def chat(course_id: int | str, question: str, note_ids: list[int | str] | None =
     return {"answer": answer, "sources": sources}
 
 
-def stream_chat(course_id: int | str, question: str, note_ids: list[int | str] | None = None):
+def stream_chat(
+    course_id: int | str,
+    question: str,
+    note_ids: list[int | str] | None = None,
+    material_texts: dict[str, str] | None = None,
+):
     """Yield Groq completion tokens followed by source metadata for SSE clients."""
     selected_note_ids = sorted({str(note_id) for note_id in (note_ids or []) if note_id})
     sources: list[str] = []
     system_prompt = (
         "You are Vidyaranya, a helpful AI tutor. Explain clearly and concisely. "
-        "Treat selected material as primary evidence and do not invent claims about it."
+        "The user selected course material. Answer using the supplied course context as your source. "
+        "Do not replace it with a generic answer from memory. If the context does not contain enough information, "
+        "say that clearly and identify what is missing. Do not claim a fact came from the material unless it appears there."
     )
     if selected_note_ids:
+        documents: list[str] = []
+        metadatas: list[dict] = []
         try:
             collection = CHROMA_CLIENT.get_collection(name=f"course_{course_id}")
             documents, metadatas = _query_selected_material_chunks(
@@ -324,6 +365,20 @@ def stream_chat(course_id: int | str, question: str, note_ids: list[int | str] |
                         sources.append(source)
         except Exception:
             pass
+
+        if not documents and material_texts:
+            documents, metadatas = _chunks_from_extracted_materials(material_texts, selected_note_ids, question)
+
+        if not documents:
+            message = (
+                "I couldn't retrieve readable text from the selected material yet. "
+                "It may still be indexing, or the file may not contain extractable text. "
+                "Check its indexing status or select a different material."
+            )
+            for part in re.findall(r"\S+\s*", message):
+                yield {"type": "token", "content": part}
+            yield {"type": "sources", "sources": [f"note:{note_id}" for note_id in selected_note_ids]}
+            return
 
     api_key = (settings.GROQ_API_KEY or "").strip()
     if api_key:
@@ -354,7 +409,7 @@ def stream_chat(course_id: int | str, question: str, note_ids: list[int | str] |
         except Exception:
             yield {"type": "token", "content": "The AI tutor could not complete this response. Please try again."}
     else:
-        fallback = chat(course_id, question, selected_note_ids)
+        fallback = chat(course_id, question, selected_note_ids, material_texts)
         for part in re.findall(r"\S+\s*", str(fallback.get("answer", ""))):
             yield {"type": "token", "content": part}
         sources = list(fallback.get("sources", []))

@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { MessageSquare, X, Send, Minimize2, Maximize2, Bot, User, BookOpen, Loader2, Sparkles, ChevronDown } from 'lucide-react';
+import { X, Send, Minimize2, Maximize2, Bot, User, BookOpen, Loader2, Sparkles } from 'lucide-react';
 import { API_URL } from '../../api/client';
 import MarkdownView from './MarkdownView';
 
@@ -74,6 +74,18 @@ export default function AiTutorWidget({ courseId, notes = [] }) {
     setInput('');
 
     const userMsg = { id: Date.now(), role: 'user', content: text };
+    const unavailableSelection = selectedNotes.some((id) =>
+      !notes.some((note) => note.id === id && note.chroma_indexed)
+    );
+    if (unavailableSelection) {
+      setMessages((prev) => [...prev, userMsg, {
+        id: Date.now() + 1,
+        role: 'assistant',
+        content: 'One or more selected materials are not indexed yet. Wait until they are marked Ready, then ask again.',
+      }]);
+      return;
+    }
+
     setMessages((prev) => [...prev, userMsg]);
 
     // AI placeholder
@@ -105,34 +117,45 @@ export default function AiTutorWidget({ courseId, notes = [] }) {
       const decoder = new TextDecoder();
       let fullContent = '';
       let sources = [];
+      let buffer = '';
+
+      const processEvent = (block) => {
+        let eventType = 'message';
+        const dataLines = [];
+        for (const line of block.split('\n')) {
+          if (line.startsWith('event:')) eventType = line.slice(6).trim();
+          else if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart());
+        }
+        if (!dataLines.length) return;
+
+        const data = JSON.parse(dataLines.join('\n'));
+        const type = data.type || eventType;
+        if (type === 'token') {
+          fullContent += data.content || '';
+          setMessages((prev) =>
+            prev.map((m) => m.id === aiMsgId ? { ...m, content: fullContent } : m)
+          );
+        } else if (type === 'metadata' || type === 'sources') {
+          sources = data.sources || [];
+        } else if (type === 'error') {
+          throw new Error(data.detail || data.message || 'AI tutor stream failed. Please retry.');
+        }
+      };
 
       while (true) {
         const { value, done } = await reader.read();
-        if (done) break;
-        const chunk = decoder.decode(value);
-        const lines = chunk.split('\n');
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            try {
-              const data = JSON.parse(line.slice(6));
-              if (data.type === 'token') {
-                fullContent += data.content;
-                setMessages((prev) =>
-                  prev.map((m) => m.id === aiMsgId ? { ...m, content: fullContent } : m)
-                );
-              } else if (data.type === 'metadata') {
-                sources = data.sources || [];
-              } else if (data.type === 'done') {
-                setMessages((prev) =>
-                  prev.map((m) => m.id === aiMsgId ? { ...m, content: fullContent, isStreaming: false, sources } : m)
-                );
-              } else if (data.type === 'error') {
-                throw new Error(data.message);
-              }
-            } catch {
-              // Ignore parse errors for non-JSON lines
-            }
-          }
+        buffer += decoder.decode(value, { stream: !done });
+        buffer = buffer.replace(/\r\n/g, '\n');
+        let eventBoundary = buffer.indexOf('\n\n');
+        while (eventBoundary !== -1) {
+          const eventBlock = buffer.slice(0, eventBoundary);
+          buffer = buffer.slice(eventBoundary + 2);
+          processEvent(eventBlock);
+          eventBoundary = buffer.indexOf('\n\n');
+        }
+        if (done) {
+          if (buffer.trim()) processEvent(buffer);
+          break;
         }
       }
 
@@ -213,17 +236,21 @@ export default function AiTutorWidget({ courseId, notes = [] }) {
           {/* Note Selector */}
           {showNoteSelector && notes.length > 0 && (
             <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-800 bg-indigo-50/50 dark:bg-indigo-950/20 shrink-0">
-              <p className="text-xs font-semibold text-slate-600 dark:text-slate-400 mb-2">Focus on these materials:</p>
+              <p className="text-xs font-semibold text-slate-600 dark:text-slate-400 mb-2">Focus on these materials ({selectedNotes.length} selected):</p>
               <div className="space-y-1 max-h-24 overflow-y-auto">
                 {notes.map((n) => (
                   <label key={n.id} className="flex items-center gap-2 cursor-pointer">
                     <input
                       type="checkbox"
                       checked={selectedNotes.includes(n.id)}
+                      disabled={!n.chroma_indexed}
                       onChange={(e) => setSelectedNotes(e.target.checked ? [...selectedNotes, n.id] : selectedNotes.filter((id) => id !== n.id))}
                       className="w-3.5 h-3.5 rounded border-slate-300 text-indigo-600"
                     />
-                    <span className="text-xs text-slate-700 dark:text-slate-300 truncate">{n.title || n.filename}</span>
+                    <span className="flex-1 text-xs text-slate-700 dark:text-slate-300 truncate">{n.title || n.file_name || n.filename}</span>
+                    <span className={`text-[10px] ${n.chroma_indexed ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-400'}`}>
+                      {n.chroma_indexed ? 'Ready' : 'Indexing / unavailable'}
+                    </span>
                   </label>
                 ))}
               </div>

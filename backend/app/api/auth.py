@@ -53,7 +53,7 @@ def _frontend_redirect(access_token: str, request: Request | None = None, is_new
             base_url = f"{scheme}://{netloc}".rstrip("/")
 
     suffix = "&new=1" if is_new_user else ""
-    return RedirectResponse(url=f"{base_url}/index.html?token={access_token}{suffix}")
+    return RedirectResponse(url=f"{base_url}/login?token={access_token}{suffix}")
 
 
 def _get_or_create_demo_user(db: Session, identity: str | None) -> tuple[User, bool]:
@@ -67,6 +67,12 @@ def _get_or_create_demo_user(db: Session, identity: str | None) -> tuple[User, b
 
     email = sanitized if "@" in sanitized else f"{sanitized}@vidyaranya.local"
     display_name = sanitized.split("@")[0].replace(".", " ").replace("_", " ").strip() or "Demo User"
+    demo_role = "faculty" if sanitized in {
+        "faculty",
+        "teacher",
+        "faculty@vidyaranya.local",
+        "teacher@vidyaranya.local",
+    } else "student"
 
     user = db.query(User).filter(User.email == email).first()
     created = False
@@ -75,10 +81,14 @@ def _get_or_create_demo_user(db: Session, identity: str | None) -> tuple[User, b
         user = User(
             email=email,
             name=" ".join(part.capitalize() for part in display_name.split()),
-            role="student",
+            role=demo_role,
             picture=None,
         )
         db.add(user)
+        db.commit()
+        db.refresh(user)
+    elif demo_role == "faculty" and user.role != "faculty":
+        user.role = "faculty"
         db.commit()
         db.refresh(user)
     return user, created
