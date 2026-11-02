@@ -30,26 +30,26 @@ export const ToastProvider = ({ children }) => {
             key={toast.id}
             className={`pointer-events-auto flex items-start gap-3 p-4 rounded-xl shadow-lg border backdrop-blur-md transition-all transform animate-in slide-in-from-bottom-5 ${
               toast.type === 'success'
-                ? 'bg-emerald-50/95 dark:bg-emerald-950/90 border-emerald-200 dark:border-emerald-800 text-emerald-900 dark:text-emerald-100'
+                ? 'bg-success/15  border-success/25  text-success '
                 : toast.type === 'error'
-                ? 'bg-rose-50/95 dark:bg-rose-950/90 border-rose-200 dark:border-rose-800 text-rose-900 dark:text-rose-100'
+                ? 'bg-destructive/15  border-destructive/25  text-destructive '
                 : toast.type === 'warning'
-                ? 'bg-amber-50/95 dark:bg-amber-950/90 border-amber-200 dark:border-amber-800 text-amber-900 dark:text-amber-100'
-                : 'bg-white/95 dark:bg-slate-900/95 border-slate-200 dark:border-slate-800 text-slate-900 dark:text-slate-100'
+                ? 'bg-warning/15  border-warning/25  text-warning '
+                : 'bg-card/95  border-border  text-foreground '
             }`}
           >
             <div className="shrink-0 mt-0.5">
-              {toast.type === 'success' && <CheckCircle2 className="w-5 h-5 text-emerald-500" />}
-              {toast.type === 'error' && <XCircle className="w-5 h-5 text-rose-500" />}
-              {toast.type === 'warning' && <AlertTriangle className="w-5 h-5 text-amber-500" />}
-              {toast.type === 'info' && <Info className="w-5 h-5 text-blue-500" />}
+              {toast.type === 'success' && <CheckCircle2 className="w-5 h-5 text-success" />}
+              {toast.type === 'error' && <XCircle className="w-5 h-5 text-destructive" />}
+              {toast.type === 'warning' && <AlertTriangle className="w-5 h-5 text-warning" />}
+              {toast.type === 'info' && <Info className="w-5 h-5 text-primary" />}
             </div>
             <div className="flex-1 text-sm font-medium leading-5">
               {toast.message}
             </div>
             <button
               onClick={() => removeToast(toast.id)}
-              className="shrink-0 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 p-0.5 rounded"
+              className="shrink-0 text-muted-foreground hover:text-muted-foreground  p-0.5 rounded"
             >
               <X className="w-4 h-4" />
             </button>

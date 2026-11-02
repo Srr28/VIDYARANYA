@@ -5,7 +5,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import get_current_teacher, get_current_user, get_db
 from app.models.course import Course
 from app.models.enrollment import Enrollment
 from app.models.user import User
@@ -66,13 +66,8 @@ def _can_access_course(db: Session, user: User, course: Course) -> bool:
 def create_course(
     payload: CourseCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_teacher),
 ) -> Course:
-    if current_user.role not in {"faculty", "teacher", "admin"}:
-        current_user.role = "faculty"
-        db.commit()
-        db.refresh(current_user)
-
     join_code = generate_unique_join_code(db)
     course = Course(
         name=payload.name,

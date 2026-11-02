@@ -15,10 +15,10 @@ function ProtectedRoute({ children }) {
   const { isAuthenticated, isLoading } = useAuth();
   if (isLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-950">
+      <div className="min-h-screen flex items-center justify-center bg-background ">
         <div className="flex flex-col items-center gap-3">
-          <Loader2 className="w-8 h-8 animate-spin text-blue-600" />
-          <p className="text-sm text-slate-500">Loading Vidyaranya…</p>
+          <Loader2 className="w-8 h-8 animate-spin text-primary" />
+          <p className="text-sm text-muted-foreground">Loading Vidyaranya…</p>
         </div>
       </div>
     );
@@ -27,13 +27,24 @@ function ProtectedRoute({ children }) {
   return children;
 }
 
+function RoleHomeRoute({ children, teacher }) {
+  const { isFaculty, isLoading } = useAuth();
+  if (isLoading) {
+    return <div className="flex min-h-screen items-center justify-center bg-background"><Loader2 className="h-8 w-8 animate-spin text-primary" /></div>;
+  }
+  if (teacher !== isFaculty) return <Navigate to={teacher ? '/student' : '/teacher'} replace />;
+  return children;
+}
+
 function AppLayout({ children }) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [profileRequest, setProfileRequest] = useState(0);
+  const openProfile = () => setProfileRequest((current) => current + 1);
   return (
-    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 transition-colors flex flex-col">
-      <Navbar onToggleSidebar={() => setSidebarOpen((v) => !v)} />
+    <div className="min-h-screen bg-background  transition-colors flex flex-col">
+      <Navbar onToggleSidebar={() => setSidebarOpen((v) => !v)} openProfileRequest={profileRequest} />
       <div className="flex flex-1 overflow-hidden">
-        <Sidebar isOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
+        <Sidebar isOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} onOpenSettings={openProfile} />
         <main className="flex-1 lg:ml-64 flex flex-col overflow-y-auto min-h-0">
           {children}
         </main>
@@ -56,6 +67,8 @@ function AppRoutes() {
           </ProtectedRoute>
         }
       />
+      <Route path="/student" element={<ProtectedRoute><RoleHomeRoute teacher={false}><AppLayout><HomePage /></AppLayout></RoleHomeRoute></ProtectedRoute>} />
+      <Route path="/teacher" element={<ProtectedRoute><RoleHomeRoute teacher><AppLayout><HomePage /></AppLayout></RoleHomeRoute></ProtectedRoute>} />
       <Route
         path="/course/:courseId"
         element={

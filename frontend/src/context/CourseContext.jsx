@@ -1,40 +1,44 @@
-import React, { createContext, useContext, useEffect, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import { coursesApi } from '../api/client';
 import { useAuth } from './AuthContext';
 
 const CourseContext = createContext();
 
 export const CourseProvider = ({ children }) => {
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, user } = useAuth();
   const [courses, setCourses] = useState([]);
   const [currentCourse, setCurrentCourse] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState('');
 
-  const fetchCourses = async () => {
+  const fetchCourses = useCallback(async () => {
     if (!isAuthenticated) {
       setCourses([]);
       setCurrentCourse(null);
+      setError('');
       return;
     }
     setIsLoading(true);
     try {
       const res = await coursesApi.list();
       setCourses(res.data || []);
+      setError('');
       // If a currentCourse is selected, update its reference
-      if (currentCourse) {
-        const updated = res.data.find((c) => c.id === currentCourse.id);
-        if (updated) setCurrentCourse(updated);
-      }
+      setCurrentCourse((current) => {
+        if (!current) return current;
+        return res.data.find((c) => c.id === current.id) || null;
+      });
     } catch (err) {
       console.error('Failed to load courses:', err);
+      setError(err.response?.data?.detail || 'Could not load your courses. Check the API server and try again.');
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [isAuthenticated]);
 
   useEffect(() => {
     fetchCourses();
-  }, [isAuthenticated]);
+  }, [fetchCourses, user?.id]);
 
   const selectCourse = (courseId) => {
     const found = courses.find((c) => c.id === courseId);
@@ -51,6 +55,7 @@ export const CourseProvider = ({ children }) => {
         selectCourse,
         refreshCourses: fetchCourses,
         isLoading,
+        error,
       }}
     >
       {children}

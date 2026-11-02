@@ -30,6 +30,7 @@ export const AuthProvider = ({ children }) => {
 
   // Load user profile on token change or startup
   useEffect(() => {
+    let active = true;
     const fetchUser = async () => {
       if (!token) {
         setUser(null);
@@ -38,17 +39,22 @@ export const AuthProvider = ({ children }) => {
       }
       try {
         const res = await authApi.getMe();
+        if (!active) return;
         setUser(res.data);
         localStorage.setItem('vidyaranya_user', JSON.stringify(res.data));
       } catch (err) {
         console.error('Failed to load current user:', err);
-        // Interceptor will handle refresh if 401; if fails, token is removed
+        if (active) {
+          setUser(null);
+          localStorage.removeItem('vidyaranya_user');
+        }
       } finally {
-        setIsLoading(false);
+        if (active) setIsLoading(false);
       }
     };
 
     fetchUser();
+    return () => { active = false; };
   }, [token]);
 
   // Listen for session expiration events from api/client.js
@@ -72,6 +78,12 @@ export const AuthProvider = ({ children }) => {
       setUser(userRes.data);
       localStorage.setItem('vidyaranya_user', JSON.stringify(userRes.data));
       return userRes.data;
+    } catch (error) {
+      localStorage.removeItem('vidyaranya_token');
+      localStorage.removeItem('vidyaranya_user');
+      setToken(null);
+      setUser(null);
+      throw error;
     } finally {
       setIsLoading(false);
     }
@@ -79,6 +91,13 @@ export const AuthProvider = ({ children }) => {
 
   const loginWithGoogle = () => {
     window.location.href = authApi.getGoogleLoginUrl();
+  };
+
+  const updateProfile = async (profile) => {
+    const response = await authApi.updateMe(profile);
+    setUser(response.data);
+    localStorage.setItem('vidyaranya_user', JSON.stringify(response.data));
+    return response.data;
   };
 
   const setAuthToken = useCallback((newToken) => {
@@ -111,6 +130,7 @@ export const AuthProvider = ({ children }) => {
         isLoading,
         loginWithDev,
         loginWithGoogle,
+        updateProfile,
         setAuthToken,
         logout,
       }}

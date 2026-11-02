@@ -331,6 +331,35 @@ class TestNotesEndpoints:
 
 
 # ---------------------------------------------------------------------------
+# 3. Course Creation Authorization
+# ---------------------------------------------------------------------------
+class TestCourseCreationAuthorization:
+    def test_student_cannot_create_course_or_be_promoted(self, client, db_session, test_users):
+        student = test_users["student"]
+        response = client.post(
+            "/courses",
+            json={"name": "Unauthorized course", "subject": "Security"},
+            headers=_auth_headers(student),
+        )
+
+        assert response.status_code == 403
+        db_session.refresh(student)
+        assert student.role == "student"
+        assert db_session.query(Course).filter(Course.name == "Unauthorized course").first() is None
+
+    def test_faculty_can_create_course(self, client, test_users):
+        faculty = test_users["faculty"]
+        response = client.post(
+            "/courses",
+            json={"name": "Authorized course", "subject": "Security", "section": "A"},
+            headers=_auth_headers(faculty),
+        )
+
+        assert response.status_code == 200
+        assert response.json()["faculty_id"] == str(faculty.id)
+
+
+# ---------------------------------------------------------------------------
 # 4. Assignments Endpoints
 # ---------------------------------------------------------------------------
 class TestAssignmentsEndpoints:

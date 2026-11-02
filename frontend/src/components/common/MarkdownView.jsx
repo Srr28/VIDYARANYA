@@ -29,7 +29,7 @@ export default function MarkdownView({ content, className = '' }) {
     const flushList = () => {
       if (listBuffer.length > 0) {
         elements.push(
-          <ul key={`ul-${elements.length}`} className="list-disc list-inside space-y-1 my-2 text-slate-700 dark:text-slate-300">
+          <ul key={`ul-${elements.length}`} className="list-disc list-inside space-y-1 my-2 text-muted-foreground ">
             {listBuffer.map((item, idx) => (
               <li key={idx} className="leading-relaxed">{parseInline(item)}</li>
             ))}
@@ -45,14 +45,14 @@ export default function MarkdownView({ content, className = '' }) {
       return parts.map((part, index) => {
         if (/^<br\s*\/?\s*>$/i.test(part)) return <br key={index} />;
         if (part.startsWith('**') && part.endsWith('**')) {
-          return <strong key={index} className="font-semibold text-slate-900 dark:text-white">{part.slice(2, -2)}</strong>;
+          return <strong key={index} className="font-semibold text-foreground ">{part.slice(2, -2)}</strong>;
         }
         if (part.startsWith('*') && part.endsWith('*')) {
           return <em key={index} className="italic">{part.slice(1, -1)}</em>;
         }
         if (part.startsWith('`') && part.endsWith('`')) {
           return (
-            <code key={index} className="px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-blue-600 dark:text-blue-400 font-mono text-xs">
+            <code key={index} className="px-1.5 py-0.5 rounded bg-muted  text-primary  font-mono text-xs">
               {part.slice(1, -1)}
             </code>
           );
@@ -60,7 +60,7 @@ export default function MarkdownView({ content, className = '' }) {
         // Citation chips [Source: ...]
         if (part.startsWith('[') && part.includes(']')) {
           return (
-            <span key={index} className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-50 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800 mx-1">
+            <span key={index} className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-secondary  text-primary  border border-primary  mx-1">
               {part}
             </span>
           );
@@ -88,12 +88,12 @@ export default function MarkdownView({ content, className = '' }) {
           <div key={`table-${i}`} className="my-3 overflow-x-auto">
             <table className="min-w-full border-collapse text-left text-xs sm:text-sm">
               <thead>
-                <tr>{header.map((cell, cellIndex) => <th key={cellIndex} className="border border-slate-300 dark:border-slate-600 bg-slate-100 dark:bg-slate-700 px-2.5 py-2 font-semibold text-slate-800 dark:text-slate-100">{parseInline(cell)}</th>)}</tr>
+                <tr>{header.map((cell, cellIndex) => <th key={cellIndex} className="border border-border  bg-muted  px-2.5 py-2 font-semibold text-foreground ">{parseInline(cell)}</th>)}</tr>
               </thead>
               <tbody>
                 {bodyRows.map((row, rowIndex) => (
                   <tr key={rowIndex}>
-                    {header.map((_, cellIndex) => <td key={cellIndex} className="border border-slate-200 dark:border-slate-700 px-2.5 py-2 align-top text-slate-700 dark:text-slate-300">{parseInline(row[cellIndex] || '')}</td>)}
+                    {header.map((_, cellIndex) => <td key={cellIndex} className="border border-border  px-2.5 py-2 align-top text-muted-foreground ">{parseInline(row[cellIndex] || '')}</td>)}
                   </tr>
                 ))}
               </tbody>
@@ -107,7 +107,7 @@ export default function MarkdownView({ content, className = '' }) {
       if (line.trim().startsWith('```')) {
         if (inCodeBlock) {
           elements.push(
-            <pre key={`code-${i}`} className="p-4 my-3 rounded-xl bg-slate-900 text-slate-100 font-mono text-xs overflow-x-auto border border-slate-800">
+            <pre key={`code-${i}`} className="p-4 my-3 rounded-xl bg-card text-muted-foreground font-mono text-xs overflow-x-auto border border-border">
               <code>{codeBuffer.join('\n')}</code>
             </pre>
           );
@@ -127,7 +127,7 @@ export default function MarkdownView({ content, className = '' }) {
 
       if (/^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
         flushList();
-        elements.push(<hr key={`hr-${i}`} className="my-3 border-slate-200 dark:border-slate-700" />);
+        elements.push(<hr key={`hr-${i}`} className="my-3 border-border " />);
         continue;
       }
 
@@ -135,21 +135,21 @@ export default function MarkdownView({ content, className = '' }) {
       if (line.startsWith('# ')) {
         flushList();
         elements.push(
-          <h1 key={`h1-${i}`} className="text-xl font-bold text-slate-900 dark:text-white mt-4 mb-2 pb-1 border-b border-slate-200 dark:border-slate-800">
+          <h1 key={`h1-${i}`} className="text-xl font-bold text-foreground  mt-4 mb-2 pb-1 border-b border-border ">
             {parseInline(line.replace('# ', ''))}
           </h1>
         );
       } else if (line.startsWith('## ')) {
         flushList();
         elements.push(
-          <h2 key={`h2-${i}`} className="text-lg font-bold text-slate-900 dark:text-white mt-3 mb-2 flex items-center gap-2">
+          <h2 key={`h2-${i}`} className="text-lg font-bold text-foreground  mt-3 mb-2 flex items-center gap-2">
             {parseInline(line.replace('## ', ''))}
           </h2>
         );
       } else if (line.startsWith('### ')) {
         flushList();
         elements.push(
-          <h3 key={`h3-${i}`} className="text-base font-semibold text-slate-900 dark:text-white mt-2 mb-1">
+          <h3 key={`h3-${i}`} className="text-base font-semibold text-foreground  mt-2 mb-1">
             {parseInline(line.replace('### ', ''))}
           </h3>
         );
@@ -158,7 +158,7 @@ export default function MarkdownView({ content, className = '' }) {
       } else if (line.trim().startsWith('>')) {
         flushList();
         elements.push(
-          <blockquote key={`quote-${i}`} className="border-l-4 border-blue-500 pl-4 py-1.5 my-2 italic text-slate-600 dark:text-slate-400 bg-blue-50/50 dark:bg-blue-950/20 rounded-r-lg">
+          <blockquote key={`quote-${i}`} className="border-l-4 border-primary pl-4 py-1.5 my-2 italic text-muted-foreground  bg-secondary  rounded-r-lg">
             {parseInline(line.replace(/^>\s*/, ''))}
           </blockquote>
         );
@@ -167,7 +167,7 @@ export default function MarkdownView({ content, className = '' }) {
       } else {
         flushList();
         elements.push(
-          <p key={`p-${i}`} className="my-2 leading-relaxed text-slate-700 dark:text-slate-300">
+          <p key={`p-${i}`} className="my-2 leading-relaxed text-muted-foreground ">
             {parseInline(line)}
           </p>
         );
@@ -176,7 +176,7 @@ export default function MarkdownView({ content, className = '' }) {
 
     if (inCodeBlock && codeBuffer.length) {
       elements.push(
-        <pre key="code-unclosed" className="p-4 my-3 rounded-xl bg-slate-900 text-slate-100 font-mono text-xs overflow-x-auto border border-slate-800">
+        <pre key="code-unclosed" className="p-4 my-3 rounded-xl bg-card text-muted-foreground font-mono text-xs overflow-x-auto border border-border">
           <code>{codeBuffer.join('\n')}</code>
         </pre>
       );
