@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import {
-  FileText, Upload, Trash2, Download, Plus, Loader2, BookOpen,
+  FileText, Upload, Trash2, Download, Plus, Loader2, BookOpen, Pencil,
   ClipboardList, Clock, Paperclip, Eye, FileDown
 } from 'lucide-react';
 import { notesApi, assignmentsApi, submissionsApi } from '../../api/client';
@@ -82,6 +82,22 @@ function NotesSection({ course, isFaculty, onNotesChanged }) {
     try {
       const form = new FormData();
       form.append('file', file);
+      const presign = await notesApi.presign(course.id, file.name, file.type || 'application/octet-stream');
+      if (presign.data?.backend === 'r2' && presign.data.upload_url) {
+        try {
+          const upload = await fetch(presign.data.upload_url, {
+            method: presign.data.method || 'PUT',
+            headers: presign.data.headers || { 'Content-Type': file.type || 'application/octet-stream' },
+            body: file,
+          });
+          if (upload.ok) {
+            form.delete('file');
+            form.append('file_key', presign.data.file_key);
+          }
+        } catch {
+          // Fall back to the backend upload if browser-to-R2 is blocked by CORS.
+        }
+      }
       const res = await notesApi.uploadDirect(course.id, form);
       setNotes((prev) => [res.data, ...prev]);
       onNotesChanged?.();
@@ -139,7 +155,7 @@ const STATUS_STYLES = {
   not_submitted: 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400',
 };
 
-function AssignmentCard({ assignment, isFaculty, onViewGrades, onSubmit, onDetails }) {
+function AssignmentCard({ assignment, isFaculty, onViewGrades, onSubmit, onDetails, onEdit }) {
   const deadline = assignment.due_date ? new Date(assignment.due_date) : null;
   const isPast = deadline && deadline < new Date();
 
@@ -172,12 +188,17 @@ function AssignmentCard({ assignment, isFaculty, onViewGrades, onSubmit, onDetai
             <Eye className="w-3.5 h-3.5" /> Details &amp; materials
           </button>
           {isFaculty ? (
-            <button
-              onClick={() => onViewGrades(assignment)}
-              className="text-xs px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-blue-50 dark:hover:bg-blue-950/40 text-slate-700 dark:text-slate-300 hover:text-blue-700 dark:hover:text-blue-300 font-semibold transition-colors"
-            >
-              View Submissions
-            </button>
+            <>
+              <button onClick={() => onEdit(assignment)} className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-indigo-50 dark:bg-indigo-950/40 hover:bg-indigo-100 text-indigo-700 dark:text-indigo-300 font-semibold transition-colors">
+                <Pencil className="w-3.5 h-3.5" /> Edit assignment
+              </button>
+              <button
+                onClick={() => onViewGrades(assignment)}
+                className="text-xs px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-blue-50 dark:hover:bg-blue-950/40 text-slate-700 dark:text-slate-300 hover:text-blue-700 dark:hover:text-blue-300 font-semibold transition-colors"
+              >
+                View Submissions
+              </button>
+            </>
           ) : (
             <button
               onClick={() => onSubmit(assignment)}
@@ -527,6 +548,119 @@ function SubmissionsModal({ assignment, onClose }) {
   );
 }
 
+function EditAssignmentModal({ assignment, onClose, onUpdated }) {
+  const toLocalDateTime = (value) => {
+    if (!value) return '';
+    const date = new Date(value);
+    date.setMinutes(date.getMinutes() - date.getTimezoneOffset());
+    return date.toISOString().slice(0, 16);
+  };
+  const [form, setForm] = useState({
+    title: assignment.title || '', description: assignment.description || '',
+    due_date: toLocalDateTime(assignment.due_date), max_marks: assignment.max_marks ?? 100,
+    ai_eval_enabled: assignment.ai_eval_enabled !== false,
+    topics_list: (assignment.topics_list || []).join(', '),
+    private_reference_solution: '',
+  });
+  const [rubric, setRubric] = useState((assignment.rubric || []).map((item) => ({ ...item, max_points: String(item.max_points) })));
+  const [reevaluateAfterRubricChange, setReevaluateAfterRubricChange] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const { showToast } = useToast();
+
+  const originalRubric = (assignment.rubric || []).map((item) => ({
+    criterion: String(item.criterion || '').trim(),
+    max_points: Number(item.max_points || 0),
+  }));
+  const normalizedCurrentRubric = rubric.map((item) => ({
+    criterion: String(item.criterion || '').trim(),
+    max_points: Number(item.max_points || 0),
+  }));
+  const rubricChanged = JSON.stringify(originalRubric) !== JSON.stringify(normalizedCurrentRubric);
+
+  useEffect(() => {
+    assignmentsApi.getReference(assignment.id)
+      .then((response) => setForm((current) => ({ ...current, private_reference_solution: response.data?.solution_text || '' })))
+      .catch(() => {});
+  }, [assignment.id]);
+
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+    const maxMarks = Number(form.max_marks);
+    const normalizedRubric = rubric.map((item) => ({ criterion: item.criterion.trim(), max_points: Number(item.max_points) }));
+    const rubricTotal = normalizedRubric.reduce((total, item) => total + item.max_points, 0);
+    if (normalizedRubric.length && Math.abs(rubricTotal - maxMarks) > 0.001) {
+      showToast(`Rubric points must total ${maxMarks}. Current total: ${rubricTotal}.`, 'error');
+      return;
+    }
+    setLoading(true);
+    try {
+      const response = await assignmentsApi.update(assignment.id, {
+        title: form.title.trim(), description: form.description,
+        due_date: form.due_date ? new Date(form.due_date).toISOString() : null,
+        max_marks: maxMarks, ai_eval_enabled: form.ai_eval_enabled,
+        rubric: normalizedRubric,
+        topics_list: form.topics_list.split(',').map((topic) => topic.trim()).filter(Boolean),
+      });
+      const solution = form.private_reference_solution.trim();
+      if (solution) await assignmentsApi.setReference(assignment.id, { solution_text: solution });
+      onUpdated(response.data);
+      if (rubricChanged && reevaluateAfterRubricChange) {
+        try {
+          const reevaluation = await assignmentsApi.reevaluate(assignment.id);
+          const queued = reevaluation.data?.queued ?? 0;
+          showToast(`Rubric updated. Re-evaluation queued for ${queued} submission(s). Scores will update as processing finishes.`, 'success');
+        } catch (error) {
+          showToast(`Assignment was saved, but re-evaluation could not be queued: ${error.response?.data?.detail || 'Please retry from the assignment.'}`, 'error');
+        }
+      } else {
+        showToast('Assignment details updated.', 'success');
+      }
+      onClose();
+    } catch (error) {
+      showToast(error.response?.data?.detail || 'Could not update the assignment.', 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <Modal title="Edit Assignment" onClose={onClose} size="lg">
+      <form onSubmit={handleSubmit} className="space-y-4">
+        <div>
+          <label className="block text-sm font-semibold mb-1.5">Title *</label>
+          <input required maxLength={255} value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} className="w-full px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-sm" />
+        </div>
+        <div>
+          <label className="block text-sm font-semibold mb-1.5">Instructions</label>
+          <textarea rows={4} value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} className="w-full px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-sm resize-y" />
+        </div>
+        <div className="grid grid-cols-2 gap-4">
+          <label className="block text-sm font-semibold">Deadline<input type="datetime-local" value={form.due_date} onChange={(event) => setForm({ ...form, due_date: event.target.value })} className="mt-1.5 w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-sm font-normal" /></label>
+          <label className="block text-sm font-semibold">Maximum marks<input type="number" required min="1" value={form.max_marks} onChange={(event) => setForm({ ...form, max_marks: event.target.value })} className="mt-1.5 w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-sm font-normal" /></label>
+        </div>
+        <div>
+          <label className="block text-sm font-semibold mb-1.5">Topics (comma-separated)</label>
+          <input value={form.topics_list} onChange={(event) => setForm({ ...form, topics_list: event.target.value })} className="w-full px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-sm" />
+        </div>
+        <section className="space-y-3 rounded-xl border border-slate-200 dark:border-slate-700 p-4">
+          <div className="flex items-center justify-between gap-2"><div><h4 className="text-sm font-semibold">Grading rubric</h4><p className="text-xs text-slate-500">If provided, criterion points must total the maximum marks.</p></div><button type="button" onClick={() => setRubric((items) => [...items, { criterion: '', max_points: '10' }])} className="flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-indigo-700 bg-indigo-50 dark:bg-indigo-950/40 dark:text-indigo-300"><Plus className="w-3.5 h-3.5" /> Add criterion</button></div>
+          {rubric.map((item, index) => <div key={index} className="flex items-center gap-2"><input aria-label={`Rubric criterion ${index + 1}`} required value={item.criterion} onChange={(event) => setRubric((items) => items.map((row, i) => i === index ? { ...row, criterion: event.target.value } : row))} placeholder="Criterion" className="min-w-0 flex-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2 text-sm" /><input aria-label="Criterion points" type="number" min="0" step="0.5" required value={item.max_points} onChange={(event) => setRubric((items) => items.map((row, i) => i === index ? { ...row, max_points: event.target.value } : row))} className="w-24 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2 text-sm" /><button type="button" onClick={() => setRubric((items) => items.filter((_, i) => i !== index))} aria-label="Remove rubric criterion" className="rounded-lg p-2 text-slate-400 hover:text-rose-600"><Trash2 className="w-4 h-4" /></button></div>)}
+          {rubric.length > 0 && <p className="text-xs text-slate-500">Total: {rubric.reduce((total, item) => total + Number(item.max_points || 0), 0)} / {form.max_marks}</p>}
+        </section>
+        {rubricChanged && (
+          <label className="flex items-start gap-3 rounded-xl border border-indigo-200 bg-indigo-50/70 p-3 dark:border-indigo-900 dark:bg-indigo-950/30">
+            <input type="checkbox" checked={reevaluateAfterRubricChange} onChange={(event) => setReevaluateAfterRubricChange(event.target.checked)} className="mt-0.5 h-4 w-4 rounded" />
+            <span><span className="block text-sm font-semibold">Re-evaluate existing submissions</span><span className="mt-0.5 block text-xs text-slate-600 dark:text-slate-400">Use the updated rubric for all submitted work. Their current AI evaluation status and scores will be replaced as the worker processes them.</span></span>
+          </label>
+        )}
+        <div><label className="block text-sm font-semibold mb-1.5">Private reference solution</label><textarea maxLength={5000} rows={4} value={form.private_reference_solution} onChange={(event) => setForm({ ...form, private_reference_solution: event.target.value })} className="w-full px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-sm resize-y" placeholder="Leave blank to keep the current reference solution unchanged." /><p className="text-xs text-slate-500 mt-1">Visible only to teachers and the grading system. Leave blank to keep it unchanged.</p></div>
+        <label className="flex items-center gap-3"><input type="checkbox" checked={form.ai_eval_enabled} onChange={(event) => setForm({ ...form, ai_eval_enabled: event.target.checked })} className="w-4 h-4 rounded" /><span className="text-sm font-medium">Enable AI evaluation</span></label>
+        <div className="flex justify-end gap-3 pt-2"><button type="button" onClick={onClose} className="px-4 py-2 rounded-xl text-sm">Cancel</button><button type="submit" disabled={loading} className="flex items-center gap-2 px-5 py-2 rounded-xl bg-indigo-600 text-white text-sm font-semibold disabled:opacity-60">{loading && <Loader2 className="w-4 h-4 animate-spin" />}Save changes</button></div>
+      </form>
+    </Modal>
+  );
+}
+
 function CreateAssignmentModal({ course, onClose, onCreated }) {
   const [form, setForm] = useState({
     title: '', description: '', due_date: '', max_marks: 100, ai_eval_enabled: true,
@@ -667,6 +801,7 @@ export default function ClassworkTab({ course, isFaculty, onNotesChanged }) {
   const [submittingFor, setSubmittingFor] = useState(null);
   const [viewingGrades, setViewingGrades] = useState(null);
   const [viewingDetails, setViewingDetails] = useState(null);
+  const [editingAssignment, setEditingAssignment] = useState(null);
 
   useEffect(() => {
     assignmentsApi.list(course.id)
@@ -719,6 +854,7 @@ export default function ClassworkTab({ course, isFaculty, onNotesChanged }) {
                 onSubmit={(asgn) => setSubmittingFor(asgn)}
                 onViewGrades={(asgn) => setViewingGrades(asgn)}
                 onDetails={(asgn) => setViewingDetails(asgn)}
+                onEdit={(asgn) => setEditingAssignment(asgn)}
               />
             ))}
           </div>
@@ -729,6 +865,7 @@ export default function ClassworkTab({ course, isFaculty, onNotesChanged }) {
       {submittingFor && <SubmitModal assignment={submittingFor} onClose={() => setSubmittingFor(null)} onSubmitted={() => {}} />}
       {viewingGrades && <SubmissionsModal assignment={viewingGrades} onClose={() => setViewingGrades(null)} />}
       {viewingDetails && <AssignmentDetailsModal assignment={viewingDetails} isFaculty={isFaculty} onClose={() => setViewingDetails(null)} />}
+      {editingAssignment && <EditAssignmentModal assignment={editingAssignment} onClose={() => setEditingAssignment(null)} onUpdated={(updated) => setAssignments((current) => current.map((item) => item.id === updated.id ? updated : item))} />}
     </div>
   );
 }

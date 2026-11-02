@@ -357,12 +357,6 @@ def stream_chat(
             )
             if not documents:
                 documents, metadatas = _fallback_selected_material_chunks(collection, selected_note_ids, question)
-            if documents:
-                system_prompt += "\nCourse material context:\n" + "\n\n".join(documents)
-                for meta in metadatas:
-                    source = meta.get("source", "note") if isinstance(meta, dict) else "note"
-                    if source not in sources:
-                        sources.append(source)
         except Exception:
             pass
 
@@ -379,6 +373,17 @@ def stream_chat(
                 yield {"type": "token", "content": part}
             yield {"type": "sources", "sources": [f"note:{note_id}" for note_id in selected_note_ids]}
             return
+
+        # Add context after vector retrieval and direct file-text fallback.
+        # Otherwise a Chroma failure can leave the model with a context-free prompt.
+        system_prompt += (
+            "\n\nSelected course material excerpts (use these as your source):\n"
+            + "\n\n".join(documents)
+        )
+        for meta in metadatas:
+            source = meta.get("source", "note") if isinstance(meta, dict) else "note"
+            if source not in sources:
+                sources.append(source)
 
     api_key = (settings.GROQ_API_KEY or "").strip()
     if api_key:

@@ -1,6 +1,6 @@
 import React, { useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { GraduationCap, Sparkles, BookOpen, Users, BarChart3 } from 'lucide-react';
+import { GraduationCap, BookOpen, Users, BarChart3 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { authApi } from '../api/client';
 
@@ -11,7 +11,7 @@ const features = [
 ];
 
 export default function LoginPage() {
-  const { isAuthenticated, setAuthToken, loginWithDev, isLoading } = useAuth();
+  const { isAuthenticated, setAuthToken, isLoading } = useAuth();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
 
@@ -29,15 +29,6 @@ export default function LoginPage() {
       navigate('/', { replace: true });
     }
   }, [isAuthenticated, isLoading, navigate]);
-
-  const handleDevLogin = async (role) => {
-    try {
-      await loginWithDev(role);
-      navigate('/');
-    } catch (err) {
-      console.error('Dev login failed', err);
-    }
-  };
 
   const handleGoogleLogin = () => {
     window.location.href = authApi.getGoogleLoginUrl();
@@ -127,32 +118,6 @@ export default function LoginPage() {
               </svg>
               Continue with Google
             </button>
-
-            <div className="relative flex items-center gap-3 mb-6">
-              <div className="flex-1 h-px bg-white/10" />
-              <span className="text-slate-500 text-xs font-medium">or continue as</span>
-              <div className="flex-1 h-px bg-white/10" />
-            </div>
-
-            {/* Dev Login Buttons */}
-            <div className="space-y-3">
-              <button
-                id="btn-dev-faculty"
-                onClick={() => handleDevLogin('faculty')}
-                className="w-full flex items-center justify-center gap-2 px-5 py-3 rounded-2xl bg-purple-600/20 hover:bg-purple-600/30 border border-purple-500/30 hover:border-purple-500/50 text-purple-300 hover:text-purple-200 font-semibold text-sm transition-all"
-              >
-                <Sparkles className="w-4 h-4" />
-                Demo as Faculty
-              </button>
-              <button
-                id="btn-dev-student"
-                onClick={() => handleDevLogin('student')}
-                className="w-full flex items-center justify-center gap-2 px-5 py-3 rounded-2xl bg-blue-600/20 hover:bg-blue-600/30 border border-blue-500/30 hover:border-blue-500/50 text-blue-300 hover:text-blue-200 font-semibold text-sm transition-all"
-              >
-                <BookOpen className="w-4 h-4" />
-                Demo as Student
-              </button>
-            </div>
 
             <p className="text-center text-slate-600 text-xs mt-6">
               By signing in, you agree to use this platform responsibly.

@@ -94,3 +94,25 @@ class SubmissionOverride(BaseModel):
 
 class AssignmentDueDateUpdate(BaseModel):
     due_date: datetime | None = None
+
+
+class AssignmentUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    description: str | None = None
+    topics_list: list[str] | None = None
+    rubric: list[dict] | None = None
+    ai_eval_enabled: bool | None = None
+    max_marks: int | None = Field(default=None, ge=1)
+    due_date: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_rubric_total(self) -> "AssignmentUpdate":
+        if self.rubric is None:
+            return self
+        try:
+            points = [float(item.get("max_points", 0)) for item in self.rubric]
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError("Each rubric criterion must include numeric max_points") from exc
+        if any(not str(item.get("criterion", "")).strip() or value < 0 for item, value in zip(self.rubric, points)):
+            raise ValueError("Rubric criteria need a name and non-negative points")
+        return self

@@ -1,0 +1,5 @@
+# One Google email per line for faculty members and teaching assistants.
+# Emails in this file receive faculty access; all other Google accounts are students.
+# Lines beginning with # are comments.
+
+chandorikarved@gmail.com

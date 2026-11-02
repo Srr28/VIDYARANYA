@@ -231,8 +231,14 @@ def auth_callback(
     email = user_info.get("email")
     if not email:
         raise HTTPException(status_code=400, detail="Google account did not return an email")
+    email = email.strip().lower()
+    authorized_faculty = email in settings.faculty_email_allowlist
 
-    user = db.query(User).filter(User.email == email).first()
+    # Faculty membership comes only from the allowlist file. Listed emails
+    # receive faculty access; all other Google accounts remain students.
+    resolved_role = "faculty" if authorized_faculty else "student"
+
+    user = db.query(User).filter(User.email.ilike(email)).first()
     created = False
     if user is None:
         created = True
@@ -240,9 +246,13 @@ def auth_callback(
             email=email,
             name=user_info.get("name") or email,
             picture=user_info.get("picture"),
-            role="student",
+            role=resolved_role,
         )
         db.add(user)
+        db.commit()
+        db.refresh(user)
+    elif user.role != "admin" and user.role != resolved_role:
+        user.role = resolved_role
         db.commit()
         db.refresh(user)
 

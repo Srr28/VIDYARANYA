@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { X, Send, Minimize2, Maximize2, Bot, User, BookOpen, Loader2, Sparkles } from 'lucide-react';
-import { API_URL } from '../../api/client';
+import apiClient, { API_URL } from '../../api/client';
 import MarkdownView from './MarkdownView';
 
 function ChatMessage({ msg }) {
@@ -74,18 +74,6 @@ export default function AiTutorWidget({ courseId, notes = [] }) {
     setInput('');
 
     const userMsg = { id: Date.now(), role: 'user', content: text };
-    const unavailableSelection = selectedNotes.some((id) =>
-      !notes.some((note) => note.id === id && note.chroma_indexed)
-    );
-    if (unavailableSelection) {
-      setMessages((prev) => [...prev, userMsg, {
-        id: Date.now() + 1,
-        role: 'assistant',
-        content: 'One or more selected materials are not indexed yet. Wait until they are marked Ready, then ask again.',
-      }]);
-      return;
-    }
-
     setMessages((prev) => [...prev, userMsg]);
 
     // AI placeholder
@@ -94,9 +82,9 @@ export default function AiTutorWidget({ courseId, notes = [] }) {
     setStreaming(true);
 
     try {
-      const token = localStorage.getItem('vidyaranya_token');
-      const res = await fetch(`${API_URL}/chat`, {
+      const makeRequest = (token) => fetch(`${API_URL}/chat`, {
         method: 'POST',
+        credentials: 'include',
         headers: {
           'Content-Type': 'application/json',
           'Accept': 'text/event-stream',
@@ -108,9 +96,24 @@ export default function AiTutorWidget({ courseId, notes = [] }) {
           note_ids: selectedNotes.length > 0 ? selectedNotes : undefined,
         }),
       });
+      let token = localStorage.getItem('vidyaranya_token');
+      let res = await makeRequest(token);
+      if (res.status === 401) {
+        const refreshed = await apiClient.post('/auth/refresh', {});
+        token = refreshed.data.access_token;
+        localStorage.setItem('vidyaranya_token', token);
+        res = await makeRequest(token);
+      }
 
       if (!res.ok) {
-        throw new Error(`HTTP ${res.status}`);
+        let detail = `AI Tutor request failed (${res.status})`;
+        try {
+          const payload = await res.json();
+          detail = payload.detail || detail;
+        } catch {
+          // Keep the HTTP status message when the response is not JSON.
+        }
+        throw new Error(detail);
       }
 
       const reader = res.body.getReader();
@@ -243,13 +246,12 @@ export default function AiTutorWidget({ courseId, notes = [] }) {
                     <input
                       type="checkbox"
                       checked={selectedNotes.includes(n.id)}
-                      disabled={!n.chroma_indexed}
                       onChange={(e) => setSelectedNotes(e.target.checked ? [...selectedNotes, n.id] : selectedNotes.filter((id) => id !== n.id))}
                       className="w-3.5 h-3.5 rounded border-slate-300 text-indigo-600"
                     />
                     <span className="flex-1 text-xs text-slate-700 dark:text-slate-300 truncate">{n.title || n.file_name || n.filename}</span>
-                    <span className={`text-[10px] ${n.chroma_indexed ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-400'}`}>
-                      {n.chroma_indexed ? 'Ready' : 'Indexing / unavailable'}
+                    <span className={`text-[10px] ${n.chroma_indexed ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'}`}>
+                      {n.chroma_indexed ? 'Ready' : 'Available · search indexing pending'}
                     </span>
                   </label>
                 ))}

@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, model_validator
+from pydantic import AliasChoices, BaseModel, Field, model_validator
 
 
 class CourseCreate(BaseModel):
@@ -12,7 +12,7 @@ class CourseCreate(BaseModel):
 
 
 class CourseJoinRequest(BaseModel):
-    code: str
+    code: str = Field(validation_alias=AliasChoices("code", "join_code"))
 
 
 class CourseOut(BaseModel):

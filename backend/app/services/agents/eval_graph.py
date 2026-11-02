@@ -385,8 +385,21 @@ def integrity_node(state: EvaluationState) -> EvaluationState:
 
 
 def coverage_node(state: EvaluationState) -> EvaluationState:
-    topics = state.get("topics_list") or [str(item.get("criterion", "General")) for item in state.get("rubric", [])]
     rubric = state.get("rubric", [])
+    # Rubric criterion names are the canonical scoring keys. Assignment topic
+    # tags are useful context, but often differ from the criterion wording and
+    # must not be used as dictionary keys for rubric scores.
+    rubric_topics = [
+        " ".join(str(item.get("criterion") or "").split())
+        for item in rubric
+        if isinstance(item, dict) and str(item.get("criterion") or "").strip()
+    ]
+    course_topics = [
+        " ".join(str(topic).split())
+        for topic in (state.get("topics_list") or [])
+        if topic is not None and str(topic).strip()
+    ]
+    topics = list(dict.fromkeys(rubric_topics or course_topics or ["General"]))
     reference = state.get("reference_solution", "")
     chunks = _chunk_submission(state.get("raw_text", ""))
     if not chunks:
@@ -406,7 +419,8 @@ def coverage_node(state: EvaluationState) -> EvaluationState:
     # Keep the full chunk in every request. Bound supplementary context first,
     # so the generic prompt-size guard can never lop off the end of student work.
     rubric_text = json.dumps(rubric, ensure_ascii=False)[:2000]
-    topics_text = json.dumps(topics, ensure_ascii=False)[:600]
+    topics_text = json.dumps(course_topics, ensure_ascii=False)[:600]
+    criteria_text = json.dumps(topics, ensure_ascii=False)[:1000]
     reference_text = reference[:3000]
     per_chunk: list[list[dict[str, Any]]] = []
     system = (
@@ -414,18 +428,32 @@ def coverage_node(state: EvaluationState) -> EvaluationState:
         "This is one part of a possibly longer submission: score evidence in this part only and do not say "
         "a criterion is missing merely because it may appear in another part. Return JSON only in the form "
         '{"topics":[{"topic":"...","score":0,"evidence":[],"missing":[]}]}. '
+        "Return exactly one result for each evaluation criterion, using its exact name. Use the teacher reference "
+        "solution as a guide to recognize correct content, while accepting equivalent valid answers. "
         "Score each criterion from 0 to 10 based on evidence in this part. For any criterion below 10, "
         "name the specific required element not evidenced in this part in missing; do not use vague labels."
     )
 
     for index, chunk in enumerate(chunks, start=1):
         user = (
-            f"Criteria and rubric: {rubric_text}\nTopics: {topics_text}\n"
+            f"Evaluation criteria (use these exact names): {criteria_text}\nRubric: {rubric_text}\n"
+            f"Assignment topic context: {topics_text}\n"
+            f"Teacher reference solution (grading guidance): {reference_text}\n"
             f"Submission part {index} of {len(chunks)}:\n{chunk}"
         )
         # Supplementary context is bounded above; 4,500 characters of actual
         # submission plus labels remain below MAX_GROQ_USER_CHARS.
         result = _ask_json(settings.GROQ_MODEL, system, user)
+        if not isinstance(result.get("topics"), list) or not result.get("topics"):
+            logger.warning(
+                "Coverage response was empty for submission %s, chunk %d/%d; retrying with strict JSON instructions",
+                state.get("submission_id"), index, len(chunks),
+            )
+            result = _ask_json(
+                settings.GROQ_MODEL,
+                system + " Your previous response was empty or invalid. Return a non-empty topics array with one item per evaluation criterion, even if a criterion receives 0.",
+                user,
+            )
         result = _clamp_coverage_scores(result, str(state.get("submission_id", "unknown")), f"chunk {index}/{len(chunks)}")
         try:
             parsed = TopicCoverageList.model_validate(result)
@@ -439,7 +467,19 @@ def coverage_node(state: EvaluationState) -> EvaluationState:
                 )
                 per_chunk.append([])
                 continue
-            per_chunk.append([item.model_dump() for item in parsed.topics])
+            parsed_topics = [item.model_dump() for item in parsed.topics]
+            expected = {topic.casefold(): topic for topic in topics}
+            # Models sometimes echo an assignment tag or the literal "None"
+            # instead of a rubric criterion. Keep results by exact name where
+            # possible, and use response order only when counts align.
+            for topic_index, item in enumerate(parsed_topics):
+                label = str(item.get("topic") or "").strip()
+                canonical = expected.get(label.casefold())
+                if canonical is None and len(parsed_topics) == len(topics) and topic_index < len(topics):
+                    canonical = topics[topic_index]
+                if canonical is not None:
+                    item["topic"] = canonical
+            per_chunk.append(parsed_topics)
         except ValidationError as exc:
             logger.warning(
                 "Could not parse coverage result for submission %s, chunk %d/%d; validation_errors=%s; response_keys=%s",
@@ -523,7 +563,8 @@ def coverage_node(state: EvaluationState) -> EvaluationState:
                 for item in synthesis
             ]
             final_user = (
-                f"Criteria and rubric: {rubric_text}\nTopics: {topics_text}\n"
+                f"Evaluation criteria (use these exact names): {criteria_text}\nRubric: {rubric_text}\n"
+                f"Assignment topic context: {topics_text}\n"
                 f"Teacher reference solution (grading guidance): {reference_text[:1800]}\n"
                 f"Evidence gathered from all submission parts: {json.dumps(compact, ensure_ascii=False)}"
             )
@@ -535,11 +576,20 @@ def coverage_node(state: EvaluationState) -> EvaluationState:
             try:
                 final_coverage = TopicCoverageList.model_validate(final_result).topics
                 final_by_topic = {item.topic.strip().lower(): item for item in final_coverage}
-                for item in coverage:
+                for topic_index, item in enumerate(coverage):
                     final_item = final_by_topic.get(str(item["topic"]).strip().lower())
+                    if final_item is None and len(final_coverage) == len(coverage) and topic_index < len(final_coverage):
+                        final_item = final_coverage[topic_index]
                     if final_item is not None:
-                        item["score"] = final_item.score
-                        item["missing"] = final_item.missing
+                        final_evidence = [value.strip() for value in final_item.evidence if value.strip()]
+                        # A synthesis response that drops evidence must not
+                        # erase a positive, evidence-backed chunk score.
+                        if final_evidence or not item.get("evidence"):
+                            item["score"] = final_item.score
+                            item["missing"] = [
+                                value for value in final_item.missing
+                                if value.strip().casefold() not in {"none", "n/a", "not applicable"}
+                            ]
             except ValidationError:
                 logger.warning("Could not parse final coverage synthesis for submission %s", state.get("submission_id"))
     return {"topic_coverage": coverage}

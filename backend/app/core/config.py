@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from urllib.parse import urlparse
 from typing import Any
 
@@ -43,6 +44,20 @@ class Settings(BaseSettings):
         if self.R2_ACCOUNT_ID:
             return f"https://{self.R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
         return None
+
+    @property
+    def faculty_email_allowlist(self) -> set[str]:
+        email_file = Path(__file__).resolve().parents[2] / "faculty_emails.txt"
+        try:
+            lines = email_file.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return set()
+        emails = set()
+        for line in lines:
+            email = line.split("#", 1)[0].strip().lower()
+            if email:
+                emails.add(email)
+        return emails
 
     model_config = SettingsConfigDict(env_file=(".env", "../.env"), extra="ignore")
 

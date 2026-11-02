@@ -102,7 +102,7 @@ export const authApi = {
 export const coursesApi = {
   list: () => apiClient.get('/courses'),
   create: (data) => apiClient.post('/courses', data),
-  join: (joinCode) => apiClient.post('/courses/join', { join_code: joinCode }),
+  join: (joinCode) => apiClient.post('/courses/join', { code: joinCode }),
   getPeople: (courseId) => apiClient.get(`/courses/${courseId}/people`),
   removeStudent: (courseId, studentId) =>
     apiClient.delete(`/courses/${courseId}/students/${studentId}`),
@@ -112,10 +112,12 @@ export const notesApi = {
   list: (courseId) => apiClient.get(`/notes/${courseId}`),
   presign: (courseId, filename, contentType = 'application/pdf') =>
     apiClient.post(`/courses/${courseId}/notes/presign`, { filename, content_type: contentType }),
-  uploadDirect: (courseId, formData) =>
-    apiClient.post(`/notes/upload?course_id=${courseId}`, formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    }),
+  uploadDirect: (courseId, formData) => {
+    const file = formData.get('file');
+    formData.set('course_id', String(courseId));
+    if (!formData.get('title')) formData.set('title', file?.name || 'Course material');
+    return apiClient.post('/notes/upload', formData);
+  },
   download: (noteId) =>
     apiClient.get(`/notes/${noteId}/download`, { responseType: 'blob' }),
   delete: (noteId) => apiClient.delete(`/notes/${noteId}`),
@@ -126,6 +128,7 @@ export const assignmentsApi = {
   create: (courseId, data) =>
     apiClient.post(`/courses/${courseId}/assignments`, { ...data, course_id: courseId }),
   get: (assignmentId) => apiClient.get(`/assignments/${assignmentId}`),
+  update: (assignmentId, data) => apiClient.patch(`/assignments/${assignmentId}`, data),
   delete: (assignmentId) => apiClient.delete(`/assignments/${assignmentId}`),
   endNow: (assignmentId) => apiClient.post(`/assignments/${assignmentId}/end`),
   reevaluate: (assignmentId) => apiClient.post(`/assignments/${assignmentId}/reevaluate`),
@@ -133,9 +136,7 @@ export const assignmentsApi = {
   setReference: (assignmentId, data) => apiClient.put(`/assignments/${assignmentId}/reference`, data),
   getAttachments: (assignmentId) => apiClient.get(`/assignments/${assignmentId}/attachments`),
   uploadAttachment: (assignmentId, formData) =>
-    apiClient.post(`/assignments/${assignmentId}/attachments`, formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    }),
+    apiClient.post(`/assignments/${assignmentId}/attachments`, formData),
   downloadAttachment: (attachmentId) =>
     apiClient.get(`/assignments/attachments/${attachmentId}/download`, { responseType: 'blob' }),
 };
@@ -148,9 +149,7 @@ export const submissionsApi = {
   presign: (assignmentId, filename, contentType = 'application/pdf') =>
     apiClient.post(`/assignments/${assignmentId}/submit/presign`, { filename, content_type: contentType }),
   submit: (assignmentId, formData) =>
-    apiClient.post(`/assignments/${assignmentId}/submit`, formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    }),
+    apiClient.post(`/assignments/${assignmentId}/submit`, formData),
   getAiStatus: (submissionId) => apiClient.get(`/ai/status/${submissionId}`),
   overrideGrade: (submissionId, payload) =>
     apiClient.patch(`/submissions/${submissionId}/grade`, payload),
@@ -158,7 +157,7 @@ export const submissionsApi = {
   addComment: (submissionId, comment) =>
     apiClient.post(`/submissions/${submissionId}/comments`, { comment }),
   getLeaderboard: (courseId) => apiClient.get(`/submissions/leaderboard/${courseId}`),
-  getMyGrades: () => apiClient.get('/submissions/my-grades'),
+  getMyGrades: (courseId) => apiClient.get(`/submissions/my-grades?course_id=${courseId}`),
   downloadUrl: (submissionId) => `${API_URL}/submissions/${submissionId}/download`,
 };
 

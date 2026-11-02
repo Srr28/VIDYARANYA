@@ -18,7 +18,7 @@ from app.models.submission import Submission
 from app.models.user import User
 from app.schemas.assignment import (
     AssignmentCreate,
-    AssignmentDueDateUpdate,
+    AssignmentUpdate,
     AssignmentOut,
     AssignmentReferenceOut,
     AssignmentReferenceUpdate,
@@ -230,9 +230,9 @@ def list_assignments(
 
 
 @router.patch("/{assignment_id}", response_model=AssignmentOut)
-def update_assignment_due_date(
+def update_assignment(
     assignment_id: uuid.UUID,
-    payload: AssignmentDueDateUpdate,
+    payload: AssignmentUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> Assignment:
@@ -242,9 +242,29 @@ def update_assignment_due_date(
 
     course = db.query(Course).filter(Course.id == assignment.course_id).first()
     if not course or course.faculty_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Only the classroom owner can update due date")
+        raise HTTPException(status_code=403, detail="Only the classroom owner can update assignments")
 
-    assignment.due_date = payload.due_date
+    changes = payload.model_dump(exclude_unset=True)
+    for field in ("title", "topics_list", "rubric", "ai_eval_enabled", "max_marks"):
+        if field in changes and changes[field] is None:
+            raise HTTPException(status_code=422, detail=f"{field} cannot be null")
+    resulting_max = changes.get("max_marks", assignment.max_marks)
+    resulting_rubric = changes.get("rubric", assignment.rubric) or []
+    if resulting_rubric:
+        try:
+            rubric_total = sum(float(item.get("max_points", 0)) for item in resulting_rubric)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail="Each rubric criterion must include numeric max_points") from exc
+        if abs(rubric_total - resulting_max) > 0.001:
+            raise HTTPException(status_code=422, detail="Rubric points must add up to max_marks")
+    if "title" in changes:
+        changes["title"] = changes["title"].strip()
+        if not changes["title"]:
+            raise HTTPException(status_code=422, detail="Assignment title cannot be blank")
+    if "topics_list" in changes:
+        changes["topics_list"] = [topic.strip() for topic in changes["topics_list"] if topic.strip()]
+    for field, value in changes.items():
+        setattr(assignment, field, value)
     db.commit()
     db.refresh(assignment)
     return assignment

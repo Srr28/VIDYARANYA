@@ -21,7 +21,7 @@ const MASTERY_COLORS = { Advanced: '#10b981', Proficient: '#3b82f6', Developing:
 // ─── Student View ─────────────────────────────────────────────────────────────
 
 function StudentGradeCard({ sub }) {
-  const score = sub.final_score ?? sub.ai_score;
+  const score = sub.effective_score ?? sub.final_score ?? sub.ai_score;
   const pct = sub.assignment_max ? Math.round((score / sub.assignment_max) * 100) : null;
   const masteryColor = MASTERY_COLORS[sub.mastery_level] || '#94a3b8';
   return (
@@ -51,6 +51,28 @@ function StudentGradeCard({ sub }) {
         <p className="text-xs text-purple-600 dark:text-purple-400 bg-purple-50 dark:bg-purple-950/30 rounded-lg px-3 py-2 border border-purple-100 dark:border-purple-900">
           📝 {sub.faculty_note}
         </p>
+      )}
+      {Array.isArray(sub.topic_scores) && sub.topic_scores.length > 0 && (
+        <div className="mt-4 space-y-2">
+          <h5 className="text-xs font-bold uppercase tracking-wide text-slate-500">Topic feedback</h5>
+          {sub.topic_scores.map((item, index) => (
+            <div key={`${item.topic || 'topic'}-${index}`} className="rounded-lg bg-slate-50 dark:bg-slate-800/70 px-3 py-2">
+              <div className="flex items-center justify-between gap-3 text-xs">
+                <span className="font-semibold text-slate-700 dark:text-slate-200">{item.topic || 'Criterion'}</span>
+                <span className="shrink-0 text-slate-500">{item.score ?? 0}/{item.max_points ?? '?'}</span>
+              </div>
+              {Array.isArray(item.missing) && item.missing.length > 0 && (
+                <p className="mt-1 text-xs text-slate-500">To improve: {item.missing.join('; ')}</p>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      {sub.feedback_text && (
+        <div className="mt-4 border-t border-slate-100 dark:border-slate-800 pt-3">
+          <p className="text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">AI feedback</p>
+          <div className="text-sm"><MarkdownView content={sub.feedback_text} /></div>
+        </div>
       )}
     </div>
   );
@@ -192,16 +214,30 @@ function StudentGradesView({ course }) {
   const [loading, setLoading] = useState(true);
   const [showReport, setShowReport] = useState(false);
   const [latestTopicScores, setLatestTopicScores] = useState(null);
+  const [loadError, setLoadError] = useState('');
 
   useEffect(() => {
-    submissionsApi.getMyGrades()
+    submissionsApi.getMyGrades(course.id)
       .then((r) => {
-        const courseGrades = (r.data || []).filter((g) => g.course_id === course.id);
+        const courseGrades = (r.data?.items || [])
+          .filter((item) => item.status === 'graded' && item.submission_id)
+          .map((item) => ({
+            ...item,
+            id: item.submission_id,
+            course_id: course.id,
+            assignment_title: item.title,
+            assignment_max: item.max_score,
+            submitted_at: item.created_at,
+          }));
         setGrades(courseGrades);
-        const lastWithTopics = [...courseGrades].reverse().find((g) => g.topic_scores);
-        if (lastWithTopics) setLatestTopicScores(lastWithTopics.topic_scores);
+        const lastWithTopics = [...courseGrades].reverse().find((g) => Array.isArray(g.topic_scores) && g.topic_scores.length);
+        if (lastWithTopics) {
+          setLatestTopicScores(Object.fromEntries(lastWithTopics.topic_scores.map((item) => [
+            item.topic || 'Topic', Number(item.coverage_score ?? 0),
+          ])));
+        }
       })
-      .catch(() => {})
+      .catch((error) => setLoadError(error.response?.data?.detail || 'Could not load your grades. Please refresh and try again.'))
       .finally(() => setLoading(false));
   }, [course.id]);
 
@@ -223,6 +259,7 @@ function StudentGradesView({ course }) {
       </div>
 
       {/* Charts */}
+      {loadError && <p role="alert" className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 dark:border-rose-900 dark:bg-rose-950/30 dark:text-rose-300">{loadError}</p>}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <GradeTrajectory grades={grades} />
         <TopicMasteryRadar topicScores={latestTopicScores} />

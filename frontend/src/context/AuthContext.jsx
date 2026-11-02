@@ -3,8 +3,21 @@ import { authApi } from '../api/client';
 
 const AuthContext = createContext();
 
+function getInitialToken() {
+  const params = new URLSearchParams(window.location.search);
+  const callbackToken = params.get('token');
+  if (callbackToken) {
+    localStorage.setItem('vidyaranya_token', callbackToken);
+    params.delete('token');
+    const query = params.toString();
+    window.history.replaceState({}, '', `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash}`);
+    return callbackToken;
+  }
+  return localStorage.getItem('vidyaranya_token');
+}
+
 export const AuthProvider = ({ children }) => {
-  const [token, setToken] = useState(() => localStorage.getItem('vidyaranya_token'));
+  const [token, setToken] = useState(getInitialToken);
   const [user, setUser] = useState(() => {
     try {
       const saved = localStorage.getItem('vidyaranya_user');
@@ -93,7 +106,7 @@ export const AuthProvider = ({ children }) => {
         token,
         user,
         isAuthenticated: !!token && !!user,
-        isFaculty: user?.role === 'faculty',
+        isFaculty: ['faculty', 'teacher', 'admin'].includes(user?.role),
         isStudent: user?.role === 'student',
         isLoading,
         loginWithDev,

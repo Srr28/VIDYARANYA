@@ -36,12 +36,14 @@ def _repair_missing_note_indexes(db: Session, course_id: uuid.UUID, note_ids: li
     for note in notes:
         note_id = str(note.id)
         try:
+            can_index = collection is not None
             if collection is not None:
                 try:
                     existing = collection.get(where={"note_id": note_id}, include=["documents", "metadatas"])
                 except Exception:
                     logger.exception("Could not check Chroma chunks for note %s", note_id)
                     existing = {}
+                    can_index = False
                 if any(str(text or "").strip() for text in existing.get("documents", [])):
                     continue
 
@@ -52,10 +54,16 @@ def _repair_missing_note_indexes(db: Session, course_id: uuid.UUID, note_ids: li
                 continue
 
             material_texts[note_id] = extracted_text
-            index_note(course_id=str(course_id), text=extracted_text, note_id=note_id)
-            note.chroma_indexed = True
-            note.chunk_count = max(1, len(extracted_text.split()) // 100)
-            db.commit()
+            if can_index:
+                index_note(course_id=str(course_id), text=extracted_text, note_id=note_id)
+                note.chroma_indexed = True
+                note.chunk_count = max(1, len(extracted_text.split()) // 100)
+                db.commit()
+            else:
+                logger.warning(
+                    "Using extracted text for tutor response; Chroma is unavailable for note %s",
+                    note_id,
+                )
         except Exception:
             db.rollback()
             logger.exception("Could not repair missing Chroma index for note %s", note_id)
