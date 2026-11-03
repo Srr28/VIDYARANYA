@@ -69,7 +69,7 @@ export default function Navbar({ onToggleSidebar, openProfileRequest = 0 }) {
         <div className="flex items-center gap-3 sm:gap-4">
           <button
             onClick={onToggleSidebar}
-            className="p-2 rounded-xl text-muted-foreground hover:text-muted-foreground   hover:bg-muted  transition-colors focus:outline-none"
+            className="motion-button p-2 rounded-xl text-muted-foreground hover:text-muted-foreground   hover:bg-muted  transition-colors focus:outline-none"
             aria-label="Toggle Navigation"
           >
             <Menu className="w-5 h-5" />
@@ -105,7 +105,7 @@ export default function Navbar({ onToggleSidebar, openProfileRequest = 0 }) {
           {/* Theme Switcher */}
           <button
             onClick={toggleTheme}
-            className="p-2 rounded-xl text-muted-foreground hover:text-muted-foreground   hover:bg-muted  transition-colors"
+            className="motion-button p-2 rounded-xl text-muted-foreground hover:text-muted-foreground   hover:bg-muted  transition-colors"
             title={`Switch to ${resolvedTheme === 'dark' ? 'Light' : 'Dark'} mode`}
             aria-label={`Switch to ${resolvedTheme === 'dark' ? 'Light' : 'Dark'} mode`}
           >
@@ -145,7 +145,7 @@ export default function Navbar({ onToggleSidebar, openProfileRequest = 0 }) {
             </button>
 
             {profileOpen && (
-              <div className="absolute right-0 mt-2 w-64 rounded-2xl glass-dropdown bg-card  shadow-2xl border border-border  py-2 z-50 animate-in fade-in-50 zoom-in-95">
+              <div className="menu-enter absolute right-0 mt-2 w-64 rounded-2xl glass-dropdown bg-card  shadow-2xl border border-border  py-2 z-50">
                 <div className="px-4 py-3 border-b border-border ">
                   <p className="text-sm font-semibold text-foreground  truncate">
                     {user?.name || user?.full_name || 'User'}

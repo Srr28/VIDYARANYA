@@ -36,7 +36,7 @@ export default function Sidebar({ isOpen, onClose, onOpenSettings }) {
               onClick={() => {
                 if (window.innerWidth < 1024) onClose();
               }}
-              className={`flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-medium transition-colors ${
+              className={`nav-link flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-medium transition-colors ${
                 location.pathname === '/'
                   ? 'bg-secondary text-primary   font-semibold'
                   : 'text-muted-foreground  hover:bg-muted '
@@ -66,7 +66,7 @@ export default function Sidebar({ isOpen, onClose, onOpenSettings }) {
                       onClick={() => {
                         if (window.innerWidth < 1024) onClose();
                       }}
-                      className={`flex items-center gap-3 px-3.5 py-2 rounded-xl text-sm transition-colors ${
+                      className={`nav-link flex items-center gap-3 px-3.5 py-2 rounded-xl text-sm transition-colors ${
                         isActive
                           ? 'bg-secondary text-secondary-foreground   font-semibold shadow-xs'
                           : 'text-muted-foreground  hover:bg-muted '
@@ -100,7 +100,7 @@ export default function Sidebar({ isOpen, onClose, onOpenSettings }) {
                       onClick={() => {
                         if (window.innerWidth < 1024) onClose();
                       }}
-                      className={`flex items-center gap-3 px-3.5 py-2 rounded-xl text-sm transition-colors ${
+                      className={`nav-link flex items-center gap-3 px-3.5 py-2 rounded-xl text-sm transition-colors ${
                         isActive
                           ? 'bg-secondary text-primary   font-semibold shadow-xs'
                           : 'text-muted-foreground  hover:bg-muted '

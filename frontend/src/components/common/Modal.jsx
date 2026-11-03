@@ -30,11 +30,11 @@ export default function Modal({ isOpen, onClose, title, children, maxWidth, size
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 overflow-y-auto">
       <div
-        className="fixed inset-0 bg-card/60 backdrop-blur-sm transition-opacity"
+        className="modal-backdrop-enter fixed inset-0 bg-card/60 backdrop-blur-sm transition-opacity"
         onClick={onClose}
       />
       <div
-        className={`relative w-full ${resolvedMaxWidth} glass-panel bg-card  rounded-2xl shadow-2xl border border-border  overflow-hidden transform transition-all my-8 z-10`}
+        className={`modal-enter relative w-full ${resolvedMaxWidth} glass-panel bg-card  rounded-2xl shadow-2xl border border-border  overflow-hidden transform transition-all my-8 z-10`}
       >
         <div className="flex items-center justify-between px-6 py-4 border-b border-border ">
           <h3 className="text-lg font-semibold text-foreground ">

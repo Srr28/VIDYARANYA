@@ -1,15 +1,16 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { lazy, Suspense, useCallback, useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { Loader2, Megaphone, BookOpen, Users, BarChart3, ArrowLeft, Copy, Check } from 'lucide-react';
 import { useCourse } from '../context/CourseContext';
 import { useAuth } from '../context/AuthContext';
 import { notesApi } from '../api/client';
-import StreamTab from '../components/course/StreamTab';
-import ClassworkTab from '../components/course/ClassworkTab';
-import PeopleTab from '../components/course/PeopleTab';
-import GradesAnalyticsTab from '../components/course/GradesAnalyticsTab';
 import AiTutorWidget from '../components/common/AiTutorWidget';
 import { useToast } from '../components/common/Toast';
+
+const StreamTab = lazy(() => import('../components/course/StreamTab'));
+const ClassworkTab = lazy(() => import('../components/course/ClassworkTab'));
+const PeopleTab = lazy(() => import('../components/course/PeopleTab'));
+const GradesAnalyticsTab = lazy(() => import('../components/course/GradesAnalyticsTab'));
 
 const TABS = [
   { id: 'stream', label: 'Stream', Icon: Megaphone },
@@ -110,9 +111,9 @@ export default function CoursePage() {
   }
 
   return (
-    <div className="flex-1 flex flex-col">
+    <div className="page-enter flex-1 flex flex-col">
       {/* Course Header Banner */}
-      <div className="px-6 lg:px-8 py-8 relative overflow-hidden shrink-0" style={{ backgroundColor: currentCourse.banner_color || 'var(--c1)', color: bannerTextColor(currentCourse.banner_color) }}>
+      <div className="course-banner-pattern px-6 lg:px-8 py-8 relative overflow-hidden shrink-0" style={{ backgroundColor: currentCourse.banner_color || 'var(--c1)', color: bannerTextColor(currentCourse.banner_color) }}>
         <div className="absolute inset-0 bg-foreground/20 pointer-events-none" />
         <div className="absolute -bottom-6 -right-6 w-48 h-48 rounded-full bg-card/5 pointer-events-none" />
         <div className="absolute -top-10 left-1/3 w-72 h-72 rounded-full bg-card/5 pointer-events-none" />
@@ -162,11 +163,13 @@ export default function CoursePage() {
 
       {/* Tab Content */}
       <div className="flex-1 overflow-y-auto">
-        <div className="max-w-5xl mx-auto px-6 lg:px-8 py-6">
-          {activeTab === 'stream' && <StreamTab course={currentCourse} isFaculty={isFaculty} />}
-          {activeTab === 'classwork' && <ClassworkTab course={currentCourse} isFaculty={isFaculty} onNotesChanged={handleNotesChanged} />}
-          {activeTab === 'people' && <PeopleTab course={currentCourse} />}
-          {activeTab === 'grades' && <GradesAnalyticsTab course={currentCourse} />}
+        <div key={activeTab} className="content-enter max-w-5xl mx-auto px-6 lg:px-8 py-6">
+          <Suspense fallback={<div className="flex min-h-48 items-center justify-center"><Loader2 className="h-7 w-7 animate-spin text-primary" /></div>}>
+            {activeTab === 'stream' && <StreamTab course={currentCourse} isFaculty={isFaculty} />}
+            {activeTab === 'classwork' && <ClassworkTab course={currentCourse} isFaculty={isFaculty} onNotesChanged={handleNotesChanged} />}
+            {activeTab === 'people' && <PeopleTab course={currentCourse} />}
+            {activeTab === 'grades' && <GradesAnalyticsTab course={currentCourse} />}
+          </Suspense>
         </div>
       </div>
 

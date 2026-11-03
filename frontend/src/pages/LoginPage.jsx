@@ -52,11 +52,11 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="min-h-screen bg-background text-foreground flex">
+    <div className="ambient-surface page-enter min-h-screen bg-background text-foreground flex">
       <button
         type="button"
         onClick={toggleTheme}
-        className="fixed right-5 top-5 z-20 rounded-full border border-border bg-card p-2.5 text-muted-foreground shadow-card transition-colors hover:bg-muted"
+        className="motion-button fixed right-5 top-5 z-20 rounded-full border border-border bg-card p-2.5 text-muted-foreground shadow-card transition-colors hover:bg-muted"
         aria-label={`Switch to ${resolvedTheme === 'dark' ? 'Light' : 'Dark'} mode`}
         title={`Switch to ${resolvedTheme === 'dark' ? 'Light' : 'Dark'} mode`}
       >
@@ -93,9 +93,9 @@ export default function LoginPage() {
             </p>
           </div>
 
-          <div className="space-y-4">
+          <div className="motion-stagger space-y-4">
             {features.map(({ icon: Icon, title, desc }) => (
-              <div key={title} className="flex items-start gap-4 p-4 rounded-2xl bg-card border border-border shadow-card">
+              <div key={title} className="motion-card flex items-start gap-4 p-4 rounded-2xl bg-card border border-border shadow-card">
                 <div className="w-10 h-10 rounded-xl bg-secondary flex items-center justify-center shrink-0">
                   <Icon className="w-5 h-5 text-primary" />
                 </div>
@@ -124,7 +124,7 @@ export default function LoginPage() {
             <h1 className="text-xl font-bold text-foreground">Vidyaranya</h1>
           </div>
 
-          <div className="bg-card border border-border rounded-3xl p-8 shadow-raised">
+          <div className="content-enter bg-card border border-border rounded-3xl p-8 shadow-raised">
             <div className="mb-8">
               <h2 className="text-2xl font-bold text-foreground mb-2">Welcome back</h2>
               <p className="text-muted-foreground">Sign in to access your courses and AI tools.</p>
@@ -134,7 +134,7 @@ export default function LoginPage() {
             <button
               id="btn-google-login"
               onClick={handleGoogleLogin}
-              className="w-full flex items-center justify-center gap-3 px-5 py-3.5 rounded-2xl bg-card hover:bg-background text-foreground font-semibold text-sm transition-all shadow-lg hover:shadow-xl hover:scale-[1.01] active:scale-[0.99] mb-6"
+              className="motion-button w-full flex items-center justify-center gap-3 px-5 py-3.5 rounded-2xl bg-card hover:bg-background text-foreground font-semibold text-sm transition-all shadow-lg hover:shadow-xl hover:scale-[1.01] active:scale-[0.99] mb-6"
             >
               <span aria-hidden="true" className="flex h-5 w-5 items-center justify-center rounded-full border border-border text-xs font-bold text-primary">G</span>
               Continue with Google

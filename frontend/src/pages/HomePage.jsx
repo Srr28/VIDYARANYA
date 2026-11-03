@@ -60,10 +60,10 @@ function CourseCard({ course, currentUserId, nextDue, showNextDue = false }) {
     <Link
       ref={cardRef}
       to={`/course/${course.id}`}
-      className="group relative flex flex-col rounded-xl border border-border bg-card shadow-card hover:shadow-raised hover:-translate-y-0.5 transition-all duration-200 overflow-hidden"
+      className="motion-card group relative flex flex-col rounded-xl border border-border bg-card shadow-card hover:shadow-raised hover:-translate-y-0.5 transition-all duration-200 overflow-hidden"
     >
       {/* Header Banner */}
-      <div className="relative flex h-24 items-end px-5 pb-3" style={{ backgroundColor: bannerColor, color: bannerTextColor(course.banner_color) }}>
+      <div className="course-banner-pattern relative flex h-24 items-end px-5 pb-3" style={{ backgroundColor: bannerColor, color: bannerTextColor(course.banner_color) }}>
         <div className="absolute inset-0 bg-current/10" />
         <div className="relative z-10 flex items-end justify-between w-full">
           <div className="w-10 h-10 rounded-xl bg-current/15 backdrop-blur-sm flex items-center justify-center text-current font-bold text-lg border border-current/30">
@@ -420,7 +420,7 @@ export default function HomePage() {
   }, [courses, isFaculty, isLoading]);
 
   return (
-    <div className="flex-1 p-6 lg:p-8 max-w-7xl mx-auto w-full">
+    <div className="page-enter flex-1 p-6 lg:p-8 max-w-7xl mx-auto w-full">
       {/* Header */}
       <div className="flex items-start justify-between mb-8">
         <div>
@@ -506,7 +506,7 @@ export default function HomePage() {
 
       {!isLoading && !dashboardLoading && courses.length > 0 && isFaculty && (
         <section className="mb-10 space-y-5">
-          <div className="grid gap-4 sm:grid-cols-3">
+          <div className="motion-stagger grid gap-4 sm:grid-cols-3">
             {[
               { label: 'Students', value: teacherDashboard.students, icon: Users },
               { label: 'To review', value: teacherDashboard.reviewQueue.length, icon: ClipboardList },
@@ -575,7 +575,7 @@ export default function HomePage() {
             <Sparkles className="w-4 h-4 text-secondary-foreground " />
             <h2 className="text-sm font-bold text-muted-foreground  uppercase tracking-wider">Teaching</h2>
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+          <div className="motion-stagger grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
             {teachingCourses.map((course) => (
               <CourseCard key={course.id} course={course} currentUserId={user?.id} />
             ))}
@@ -590,7 +590,7 @@ export default function HomePage() {
             <BookOpen className="w-4 h-4 text-primary " />
             <h2 className="text-sm font-bold text-muted-foreground  uppercase tracking-wider">Enrolled</h2>
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+          <div className="motion-stagger grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
             {enrolledCourses.map((course) => (
               <CourseCard key={course.id} course={course} currentUserId={user?.id} nextDue={nextDueByCourse.get(course.id)} showNextDue={!isFaculty} />
             ))}

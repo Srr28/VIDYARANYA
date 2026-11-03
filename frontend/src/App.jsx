@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { lazy, Suspense, useState } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { ThemeProvider } from './context/ThemeContext';
@@ -6,10 +6,22 @@ import { CourseProvider } from './context/CourseContext';
 import { ToastProvider } from './components/common/Toast';
 import Navbar from './components/layout/Navbar';
 import Sidebar from './components/layout/Sidebar';
-import LoginPage from './pages/LoginPage';
-import HomePage from './pages/HomePage';
-import CoursePage from './pages/CoursePage';
 import { Loader2 } from 'lucide-react';
+
+const LoginPage = lazy(() => import('./pages/LoginPage'));
+const HomePage = lazy(() => import('./pages/HomePage'));
+const CoursePage = lazy(() => import('./pages/CoursePage'));
+
+function RouteLoading() {
+  return (
+    <div className="ambient-surface flex min-h-screen items-center justify-center bg-background">
+      <div className="flex flex-col items-center gap-3">
+        <Loader2 className="h-8 w-8 animate-spin text-primary" />
+        <p className="text-sm text-muted-foreground">Loading Vidyaranya…</p>
+      </div>
+    </div>
+  );
+}
 
 function ProtectedRoute({ children }) {
   const { isAuthenticated, isLoading } = useAuth();
@@ -41,7 +53,7 @@ function AppLayout({ children }) {
   const [profileRequest, setProfileRequest] = useState(0);
   const openProfile = () => setProfileRequest((current) => current + 1);
   return (
-    <div className="min-h-screen bg-background  transition-colors flex flex-col">
+    <div className="ambient-surface min-h-screen bg-background  transition-colors flex flex-col">
       <Navbar onToggleSidebar={() => setSidebarOpen((v) => !v)} openProfileRequest={profileRequest} />
       <div className="flex flex-1 overflow-hidden">
         <Sidebar isOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} onOpenSettings={openProfile} />
@@ -55,32 +67,34 @@ function AppLayout({ children }) {
 
 function AppRoutes() {
   return (
-    <Routes>
-      <Route path="/login" element={<LoginPage />} />
-      <Route
-        path="/"
-        element={
-          <ProtectedRoute>
-            <AppLayout>
-              <HomePage />
-            </AppLayout>
-          </ProtectedRoute>
-        }
-      />
-      <Route path="/student" element={<ProtectedRoute><RoleHomeRoute teacher={false}><AppLayout><HomePage /></AppLayout></RoleHomeRoute></ProtectedRoute>} />
-      <Route path="/teacher" element={<ProtectedRoute><RoleHomeRoute teacher><AppLayout><HomePage /></AppLayout></RoleHomeRoute></ProtectedRoute>} />
-      <Route
-        path="/course/:courseId"
-        element={
-          <ProtectedRoute>
-            <AppLayout>
-              <CoursePage />
-            </AppLayout>
-          </ProtectedRoute>
-        }
-      />
-      <Route path="*" element={<Navigate to="/" replace />} />
-    </Routes>
+    <Suspense fallback={<RouteLoading />}>
+      <Routes>
+        <Route path="/login" element={<LoginPage />} />
+        <Route
+          path="/"
+          element={
+            <ProtectedRoute>
+              <AppLayout>
+                <HomePage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route path="/student" element={<ProtectedRoute><RoleHomeRoute teacher={false}><AppLayout><HomePage /></AppLayout></RoleHomeRoute></ProtectedRoute>} />
+        <Route path="/teacher" element={<ProtectedRoute><RoleHomeRoute teacher><AppLayout><HomePage /></AppLayout></RoleHomeRoute></ProtectedRoute>} />
+        <Route
+          path="/course/:courseId"
+          element={
+            <ProtectedRoute>
+              <AppLayout>
+                <CoursePage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </Suspense>
   );
 }
 

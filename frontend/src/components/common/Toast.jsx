@@ -28,7 +28,7 @@ export const ToastProvider = ({ children }) => {
         {toasts.map((toast) => (
           <div
             key={toast.id}
-            className={`pointer-events-auto flex items-start gap-3 p-4 rounded-xl shadow-lg border backdrop-blur-md transition-all transform animate-in slide-in-from-bottom-5 ${
+            className={`toast-enter pointer-events-auto flex items-start gap-3 p-4 rounded-xl shadow-lg border backdrop-blur-md transition-all transform ${
               toast.type === 'success'
                 ? 'bg-success/15  border-success/25  text-success '
                 : toast.type === 'error'
