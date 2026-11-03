@@ -1,4 +1,5 @@
 import React, { useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
 
 const SIZE_MAP = {
@@ -27,7 +28,7 @@ export default function Modal({ isOpen, onClose, title, children, maxWidth, size
 
   if (isOpen === false) return null;
 
-  return (
+  const modal = (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 overflow-y-auto">
       <div
         className="modal-backdrop-enter fixed inset-0 bg-card/60 backdrop-blur-sm transition-opacity"
@@ -53,4 +54,9 @@ export default function Modal({ isOpen, onClose, title, children, maxWidth, size
       </div>
     </div>
   );
+
+  // Render outside animated/scrolling page containers. A transformed ancestor
+  // changes the containing block for `position: fixed`, which can trap the
+  // backdrop and dialog inside the course tab and make them appear not to open.
+  return createPortal(modal, document.body);
 }

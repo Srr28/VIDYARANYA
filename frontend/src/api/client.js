@@ -125,6 +125,7 @@ export const assignmentsApi = {
   delete: (assignmentId) => apiClient.delete(`/assignments/${assignmentId}`),
   endNow: (assignmentId) => apiClient.post(`/assignments/${assignmentId}/end`),
   reevaluate: (assignmentId) => apiClient.post(`/assignments/${assignmentId}/reevaluate`),
+  retryPending: (assignmentId) => apiClient.post(`/assignments/${assignmentId}/retry-pending`),
   getReference: (assignmentId) => apiClient.get(`/assignments/${assignmentId}/reference`),
   setReference: (assignmentId, data) => apiClient.put(`/assignments/${assignmentId}/reference`, data),
   getAttachments: (assignmentId) => apiClient.get(`/assignments/${assignmentId}/attachments`),

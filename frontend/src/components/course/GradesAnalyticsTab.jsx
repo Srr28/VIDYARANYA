@@ -186,6 +186,16 @@ function ProgressReportModal({ courseId, onClose }) {
     }
   };
 
+  const snapshot = report?.mastery_snapshot || {};
+  const topicMastery = snapshot.topic_mastery && typeof snapshot.topic_mastery === 'object'
+    ? snapshot.topic_mastery
+    : Object.fromEntries(Object.entries(snapshot).filter(([key, value]) => (
+      !['trajectory', 'average_score_pct', 'trend', 'recommendations'].includes(key)
+      && typeof value === 'number'
+    )));
+  const trajectory = Array.isArray(snapshot.trajectory) ? snapshot.trajectory : [];
+  const recommendations = Array.isArray(snapshot.recommendations) ? snapshot.recommendations : [];
+
   return (
     <Modal title="📊 My Progress Report" onClose={onClose} size="xl">
       {loading ? (
@@ -207,6 +217,12 @@ function ProgressReportModal({ courseId, onClose }) {
         </div>
       ) : (
         <div className="space-y-5 max-h-[70vh] overflow-y-auto pr-1">
+          {(snapshot.average_score_pct != null || snapshot.trend) && (
+            <div className="grid grid-cols-2 gap-3">
+              {snapshot.average_score_pct != null && <div className="rounded-xl border border-border p-4"><p className="text-2xl font-bold text-foreground">{Number(snapshot.average_score_pct).toFixed(1)}%</p><p className="text-xs text-muted-foreground">Average</p></div>}
+              {snapshot.trend && <div className="rounded-xl border border-border p-4"><p className="text-lg font-bold capitalize text-foreground">{snapshot.trend}</p><p className="text-xs text-muted-foreground">Trend</p></div>}
+            </div>
+          )}
           {report.rank && (
             <div className="flex items-center gap-3 p-4 rounded-xl bg-warning/15  border border-warning/25 ">
               <Trophy className="w-6 h-6 text-warning " />
@@ -221,15 +237,36 @@ function ProgressReportModal({ courseId, onClose }) {
               <MarkdownView content={report.narrative} />
             </div>
           )}
-          {report.mastery_snapshot && Object.keys(report.mastery_snapshot).length > 0 && (
+          {Object.keys(topicMastery).length > 0 && (
             <div className="rounded-xl border border-border  p-4">
               <h4 className="mb-3 text-sm font-bold text-muted-foreground ">Mastery snapshot</h4>
-              <ResponsiveContainer width="100%" height={Math.max(150, Object.keys(report.mastery_snapshot).length * 36)}>
-                <BarChart data={Object.entries(report.mastery_snapshot).map(([topic, score]) => ({ topic, score: Number(typeof score === 'object' ? (score.mastery_pct ?? score.score ?? 0) : score) }))} layout="vertical" margin={{ left: 20, right: 18 }}>
+              <ResponsiveContainer width="100%" height={Math.max(150, Object.keys(topicMastery).length * 36)}>
+                <BarChart data={Object.entries(topicMastery).map(([topic, score]) => ({ topic, score: Number(typeof score === 'object' ? (score.mastery_pct ?? score.score ?? 0) : score) }))} layout="vertical" margin={{ left: 20, right: 18 }}>
                   <XAxis type="number" domain={[0, 100]} tick={{ fontSize: 10, fill: 'var(--muted-foreground)' }} unit="%" /><YAxis type="category" dataKey="topic" width={110} tick={{ fontSize: 10, fill: 'var(--muted-foreground)' }} /><Tooltip /><Bar dataKey="score" fill="var(--c2)" radius={[0, 6, 6, 0]} />
                 </BarChart>
               </ResponsiveContainer>
             </div>
+          )}
+          {trajectory.length > 0 && (
+            <section className="rounded-xl border border-border p-4">
+              <h4 className="mb-3 text-sm font-bold text-muted-foreground">Assignment trajectory</h4>
+              <div className="space-y-2">
+                {trajectory.map((item, index) => (
+                  <div key={`${item.assignment_id || item.assignment_title || 'assignment'}-${index}`} className="flex items-center justify-between gap-3 rounded-lg bg-muted/50 px-3 py-2 text-sm">
+                    <span className="min-w-0 truncate text-foreground">{item.assignment_title || `Assignment ${index + 1}`}</span>
+                    <span className="shrink-0 font-semibold text-muted-foreground">{item.score_pct != null ? `${Number(item.score_pct).toFixed(1)}%` : item.status || 'Pending'}</span>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+          {recommendations.length > 0 && (
+            <section className="rounded-xl border border-border p-4">
+              <h4 className="mb-2 text-sm font-bold text-muted-foreground">Recommendations</h4>
+              <ul className="list-disc space-y-1 pl-5 text-sm text-foreground">
+                {recommendations.map((recommendation, index) => <li key={`${recommendation}-${index}`}>{recommendation}</li>)}
+              </ul>
+            </section>
           )}
           <div className="flex justify-between items-center pt-2">
             <button

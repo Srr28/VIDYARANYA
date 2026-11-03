@@ -208,6 +208,40 @@ async def reevaluate_assignment_submissions(
     return {"queued": queued, "assignment_id": str(assignment_id)}
 
 
+@router.post("/{assignment_id}/retry-pending")
+async def retry_pending_assignment_submissions(
+    assignment_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """Queue only submissions that are still awaiting their first evaluation."""
+    _require_assignment_owner(assignment_id, db, current_user)
+    submissions = (
+        db.query(Submission)
+        .filter(
+            Submission.assignment_id == assignment_id,
+            Submission.status == "pending_eval",
+        )
+        .all()
+    )
+
+    queued = 0
+    for submission in submissions:
+        try:
+            await queue_service.enqueue_submission_evaluation(submission.id)
+            queued += 1
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Queued {queued} of {len(submissions)} pending submissions; retry the remaining submissions",
+            ) from exc
+    return {
+        "queued": queued,
+        "assignment_id": str(assignment_id),
+        "message": f"Queued {queued} pending submission(s); existing graded results were left unchanged.",
+    }
+
+
 @router.get("", response_model=list[AssignmentOut])
 def list_assignments(
     course_id: uuid.UUID,

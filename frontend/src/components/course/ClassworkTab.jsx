@@ -419,6 +419,7 @@ function AssignmentCard({ assignment, isFaculty, onViewGrades, onSubmit, onDetai
               </button>
               <div className="flex items-center gap-1">
                 <button onClick={() => onAction(assignment, 'end')} className="rounded-lg px-2 py-1 text-[11px] font-semibold text-warning  hover:bg-warning/15 ">End now</button>
+                <button onClick={() => onAction(assignment, 'retry_pending')} className="rounded-lg px-2 py-1 text-[11px] font-semibold text-accent-foreground  hover:bg-accent/15 ">Retry pending</button>
                 <button onClick={() => onAction(assignment, 'reevaluate')} className="rounded-lg px-2 py-1 text-[11px] font-semibold text-accent-foreground  hover:bg-accent/15 ">Re-evaluate all</button>
                 <button onClick={() => onAction(assignment, 'delete')} className="rounded-lg px-2 py-1 text-[11px] font-semibold text-destructive  hover:bg-destructive/15 ">Delete</button>
               </div>
@@ -1102,6 +1103,9 @@ export default function ClassworkTab({ course, isFaculty, onNotesChanged }) {
         const response = await assignmentsApi.endNow(assignment.id);
         setAssignments((current) => current.map((item) => item.id === assignment.id ? { ...item, ...response.data } : item));
         showToast('Assignment ended and results released.', 'success');
+      } else if (action === 'retry_pending') {
+        const response = await assignmentsApi.retryPending(assignment.id);
+        showToast(response.data?.message || `Queued ${response.data?.queued ?? 0} pending submission(s).`, response.data?.queued ? 'success' : 'info');
       } else {
         const response = await assignmentsApi.reevaluate(assignment.id);
         showToast(response.data?.message || `Re-evaluation queued for ${response.data?.queued ?? 'all'} submissions.`, 'success');
@@ -1173,7 +1177,7 @@ export default function ClassworkTab({ course, isFaculty, onNotesChanged }) {
       {viewingGrades && <SubmissionsModal assignment={viewingGrades} onClose={() => setViewingGrades(null)} />}
       {viewingDetails && <AssignmentDetailsModal assignment={viewingDetails} isFaculty={isFaculty} onClose={() => setViewingDetails(null)} />}
       {editingAssignment && <EditAssignmentModal assignment={editingAssignment} onClose={() => setEditingAssignment(null)} onUpdated={(updated) => setAssignments((current) => current.map((item) => item.id === updated.id ? updated : item))} />}
-      {pendingAction && <ConfirmDialog title={pendingAction.action === 'delete' ? 'Delete assignment?' : pendingAction.action === 'end' ? 'End assignment now?' : 'Re-evaluate all submissions?'} message={pendingAction.action === 'delete' ? `Delete “${pendingAction.assignment.title}”? Its submissions and grading history may no longer be available.` : pendingAction.action === 'end' ? `Close “${pendingAction.assignment.title}” to new submissions and release its results now?` : `Queue a new AI evaluation for every submission to “${pendingAction.assignment.title}”? Current evaluations may be replaced.`} confirmLabel={pendingAction.action === 'delete' ? 'Delete assignment' : pendingAction.action === 'end' ? 'End assignment' : 'Re-evaluate'} destructive={pendingAction.action === 'delete'} loading={actionLoading} onCancel={() => setPendingAction(null)} onConfirm={runAssignmentAction} />}
+      {pendingAction && <ConfirmDialog title={pendingAction.action === 'delete' ? 'Delete assignment?' : pendingAction.action === 'end' ? 'End assignment now?' : pendingAction.action === 'retry_pending' ? 'Retry pending evaluations?' : 'Re-evaluate all submissions?'} message={pendingAction.action === 'delete' ? `Delete “${pendingAction.assignment.title}”? Its submissions and grading history may no longer be available.` : pendingAction.action === 'end' ? `Close “${pendingAction.assignment.title}” to new submissions and release its results now?` : pendingAction.action === 'retry_pending' ? `Queue only submissions still marked pending evaluation for “${pendingAction.assignment.title}”? Existing graded and flagged results will not be changed.` : `Queue a new AI evaluation for every submission to “${pendingAction.assignment.title}”? Current evaluations may be replaced.`} confirmLabel={pendingAction.action === 'delete' ? 'Delete assignment' : pendingAction.action === 'end' ? 'End assignment' : pendingAction.action === 'retry_pending' ? 'Retry pending' : 'Re-evaluate'} destructive={pendingAction.action === 'delete'} loading={actionLoading} onCancel={() => setPendingAction(null)} onConfirm={runAssignmentAction} />}
     </div>
   );
 }
