@@ -4,14 +4,13 @@ import re
 from uuid import uuid4
 
 import chromadb
-import requests
-import json
 try:
     from sentence_transformers import SentenceTransformer
 except Exception:
     SentenceTransformer = None
 
 from app.core.config import settings
+from app.services.groq_service import groq_chat_completion, groq_chat_stream
 
 class FallbackEmbedder:
     dim = 64
@@ -58,28 +57,12 @@ def _call_groq_chat(messages: list[dict[str, str]]) -> str | None:
         return None
 
     try:
-        response = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": settings.GROQ_MODEL,
-                "messages": messages,
-                "temperature": 0.2,
-            },
-            timeout=45,
+        response = groq_chat_completion(
+            messages=messages,
+            max_output_tokens=min(settings.GROQ_MAX_COMPLETION_TOKENS, 700),
+            temperature=0.2,
         )
-        if response.status_code >= 400:
-            return None
-        payload = response.json()
-        choices = payload.get("choices") if isinstance(payload, dict) else None
-        if not choices or not isinstance(choices, list):
-            return None
-        message = choices[0].get("message") if isinstance(choices[0], dict) else None
-        content = message.get("content") if isinstance(message, dict) else None
-        content_text = str(content or "").strip()
+        content_text = str(response.choices[0].message.content or "").strip()
         return content_text or None
     except Exception:
         return None
@@ -388,29 +371,18 @@ def stream_chat(
     api_key = (settings.GROQ_API_KEY or "").strip()
     if api_key:
         try:
-            with requests.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json={"model": settings.GROQ_MODEL, "messages": [
+            chunks = groq_chat_stream(
+                messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": question},
-                ], "temperature": 0.2, "stream": True},
-                timeout=(10, 90), stream=True,
-            ) as response:
-                response.raise_for_status()
-                for line in response.iter_lines(decode_unicode=True):
-                    if not line or not line.startswith("data:"):
-                        continue
-                    raw = line[5:].strip()
-                    if raw == "[DONE]":
-                        break
-                    try:
-                        chunk = json.loads(raw)
-                        content = chunk["choices"][0].get("delta", {}).get("content")
-                    except (ValueError, KeyError, IndexError, TypeError):
-                        continue
-                    if content:
-                        yield {"type": "token", "content": content}
+                ],
+                max_output_tokens=min(settings.GROQ_MAX_COMPLETION_TOKENS, 900),
+                temperature=0.2,
+            )
+            for chunk in chunks:
+                content = chunk.choices[0].delta.content if chunk.choices else None
+                if content:
+                    yield {"type": "token", "content": content}
         except Exception:
             yield {"type": "token", "content": "The AI tutor could not complete this response. Please try again."}
     else:

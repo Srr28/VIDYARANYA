@@ -7,6 +7,7 @@ import logging
 from typing import Any
 
 from app.core.config import settings
+from app.services.groq_service import groq_chat_completion
 
 logger = logging.getLogger("vidyaranya.progress_agent")
 
@@ -61,8 +62,6 @@ def generate_progress_narrative(metrics: dict[str, Any]) -> dict[str, Any]:
         return fallback
 
     try:
-        from groq import Groq
-
         safe_metrics = {
             "average_score_pct": metrics.get("average_score_pct"),
             "trend": fallback["trend"],
@@ -80,8 +79,7 @@ def generate_progress_narrative(metrics: dict[str, Any]) -> dict[str, Any]:
                 for item in fallback_trajectory(metrics.get("trajectory") or [])[-12:]
             ],
         }
-        response = Groq(api_key=settings.GROQ_API_KEY).chat.completions.create(
-            model=settings.GROQ_MODEL,
+        response = groq_chat_completion(
             messages=[
                 {
                     "role": "system",
@@ -95,7 +93,7 @@ def generate_progress_narrative(metrics: dict[str, Any]) -> dict[str, Any]:
                 {"role": "user", "content": json.dumps(safe_metrics, ensure_ascii=False)},
             ],
             temperature=0.2,
-            max_tokens=300,
+            max_output_tokens=min(settings.GROQ_MAX_COMPLETION_TOKENS, 300),
             response_format={"type": "json_object"},
         )
         parsed = json.loads(response.choices[0].message.content or "{}")

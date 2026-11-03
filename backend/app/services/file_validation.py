@@ -16,11 +16,13 @@ _SIGNATURES = {
     ".docx": (b"PK\x03\x04",),
     ".pptx": (b"PK\x03\x04",),
     ".xlsx": (b"PK\x03\x04",),
-    ".doc": (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1",),
-    ".xls": (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1",),
     ".webp": (b"RIFF",),
 }
-_TEXT_EXTENSIONS = {".txt", ".md", ".csv", ".json", ".py", ".ipynb", ".html", ".xml", ".yaml", ".yml", ".js", ".ts", ".java", ".c", ".cpp", ".h", ".sql"}
+_TEXT_EXTENSIONS = {
+    ".txt", ".md", ".csv", ".json", ".py", ".ipynb", ".html", ".xml", ".yaml", ".yml",
+    ".js", ".jsx", ".ts", ".tsx", ".java", ".c", ".cc", ".cpp", ".h", ".hpp", ".cs",
+    ".go", ".rs", ".php", ".rb", ".swift", ".kt", ".kts", ".sql", ".sh", ".css",
+}
 
 
 def validate_uploaded_file(filename: str, data: bytes) -> None:
@@ -30,6 +32,11 @@ def validate_uploaded_file(filename: str, data: bytes) -> None:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
     if len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="File exceeds the 10 MB upload limit")
+    if suffix in {".doc", ".xls"}:
+        raise HTTPException(
+            status_code=415,
+            detail="Legacy .doc and .xls files are not extractable. Convert them to .docx or .xlsx and upload again.",
+        )
 
     signatures = _SIGNATURES.get(suffix)
     if signatures:

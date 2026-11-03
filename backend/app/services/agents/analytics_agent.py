@@ -7,6 +7,7 @@ import logging
 from typing import Any
 
 from app.core.config import settings
+from app.services.groq_service import groq_chat_completion
 
 logger = logging.getLogger("vidyaranya.analytics_agent")
 
@@ -46,8 +47,6 @@ def generate_class_recommendations(metrics: dict[str, Any]) -> str:
         return fallback
 
     try:
-        from groq import Groq
-
         safe_metrics = {
             "weak_topics": metrics.get("weak_topics", []),
             "at_risk_count": len(metrics.get("at_risk_students") or []),
@@ -56,8 +55,7 @@ def generate_class_recommendations(metrics: dict[str, Any]) -> str:
             "assignment_count": metrics.get("assignment_count", 0),
             "overall_rubric_pct": metrics.get("overall_rubric_pct"),
         }
-        response = Groq(api_key=settings.GROQ_API_KEY).chat.completions.create(
-            model=settings.GROQ_MODEL,
+        response = groq_chat_completion(
             messages=[
                 {
                     "role": "system",
@@ -71,7 +69,7 @@ def generate_class_recommendations(metrics: dict[str, Any]) -> str:
                 {"role": "user", "content": json.dumps(safe_metrics, ensure_ascii=False)},
             ],
             temperature=0.2,
-            max_tokens=220,
+            max_output_tokens=min(settings.GROQ_MAX_COMPLETION_TOKENS, 220),
         )
         narrative = (response.choices[0].message.content or "").strip()
         return narrative or fallback

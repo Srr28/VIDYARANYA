@@ -188,6 +188,9 @@ async def reevaluate_assignment_submissions(
     current_user: User = Depends(get_current_user),
 ) -> dict:
     _require_assignment_owner(assignment_id, db, current_user)
+    assignment = db.query(Assignment).filter(Assignment.id == assignment_id).first()
+    if not assignment or not assignment.ai_eval_enabled:
+        raise HTTPException(status_code=400, detail="AI evaluation is disabled for this assignment")
     submissions = db.query(Submission).filter(Submission.assignment_id == assignment_id).all()
     for submission in submissions:
         submission.status = "pending_eval"

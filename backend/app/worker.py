@@ -9,7 +9,10 @@ exponential backoff and retry mechanisms.
 """
 
 import asyncio
+from functools import lru_cache
+import json
 import logging
+import math
 from pathlib import Path
 import re
 from datetime import datetime, timezone
@@ -23,13 +26,21 @@ from app.core.database import SessionLocal, engine
 from app.db.phase4_schema import ensure_submission_depth_columns
 from app.models.analytics_report import AnalyticsReport
 from app.models.assignment import Assignment
+from app.models.assignment_attachment import AssignmentAttachment
 from app.models.assignment_reference import AssignmentReference
 from app.models.course import Course
 from app.models.note import Note
 from app.models.submission import Submission
 from app.models.submission_text import SubmissionText
 from app.services.agents.eval_graph import integrity_node, run_evaluation_graph
+from app.services.agents.eval_graph import EvaluationOutputError
 from app.services.grading_service import grade
+from app.services.groq_service import (
+    GroqConfigurationError,
+    GroqRateLimitDeferred,
+    GroqRequestTooLarge,
+    retry_after_seconds,
+)
 from app.services.ocr_service import extract_text_from_bytes
 from app.services.queue_service import get_redis_settings, queue_service
 from app.services.rag_service import index_note
@@ -37,6 +48,44 @@ from app.services.storage_service import storage_service
 
 logger = logging.getLogger("vidyaranya.worker")
 _legacy_grade = grade
+
+
+@lru_cache(maxsize=96)
+def _cached_context_file(file_key: str, filename: str, mime_type: str | None) -> str:
+    """Extract immutable teacher material once per worker process and file key."""
+    data = storage_service.download_file_bytes(file_key)
+    return extract_text_from_bytes(data, filename=filename, mime_type=mime_type or "")
+
+
+async def _load_teacher_context_file(file_key: str, filename: str, mime_type: str | None) -> str:
+    try:
+        return await asyncio.to_thread(_cached_context_file, file_key, filename, mime_type)
+    except Exception as exc:
+        logger.warning("Could not extract teacher context file %s: %s", filename, exc)
+        return ""
+
+
+def _select_context_excerpt(text: str, query: str, max_chars: int) -> str:
+    """Choose the most assignment-relevant bounded passage from teacher material."""
+    cleaned = (text or "").strip()
+    if len(cleaned) <= max_chars:
+        return cleaned
+    query_terms = set(re.findall(r"[\w-]{3,}", (query or "").casefold()))
+    if not query_terms:
+        return cleaned[:max_chars]
+
+    step = max(1, max_chars // 2)
+    starts = list(range(0, max(1, len(cleaned) - max_chars + 1), step))
+    starts.append(max(0, len(cleaned) - max_chars))
+    best_start = 0
+    best_score = -1
+    for start in starts:
+        window = cleaned[start : start + max_chars]
+        terms = set(re.findall(r"[\w-]{3,}", window.casefold()))
+        score = len(query_terms & terms)
+        if score > best_score:
+            best_start, best_score = start, score
+    return cleaned[best_start : best_start + max_chars]
 
 try:
     from arq import cron
@@ -67,6 +116,8 @@ def _compute_mastery_level(score: float, max_score: float) -> str:
 
 def _is_rate_limit_error(exc: Exception) -> bool:
     """Detect Groq rate-limit errors, including token-limit responses returned as 413."""
+    if isinstance(exc, GroqRateLimitDeferred):
+        return True
     exc_str = str(exc).lower()
     if any(marker in exc_str for marker in (
         "429",
@@ -85,6 +136,11 @@ def _is_rate_limit_error(exc: Exception) -> bool:
 
 def _rate_limit_retry_after_seconds(exc: Exception) -> int | None:
     """Extract Groq's suggested wait (for example, `20m46.7s`) when present."""
+    if isinstance(exc, GroqRateLimitDeferred):
+        return max(1, math.ceil(exc.wait_seconds))
+    provider_wait = retry_after_seconds(exc)
+    if provider_wait:
+        return provider_wait
     match = re.search(r"try again in\s+(?:(\d+)m)?(\d+(?:\.\d+)?)s", str(exc), re.IGNORECASE)
     if not match:
         return None
@@ -126,17 +182,29 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
             logger.warning("Submission %s not found. Skipping evaluation.", submission_id)
             return {"status": "not_found", "submission_id": submission_id}
 
-        # Update status to 'evaluating'
-        submission.status = "evaluating"
-        db.commit()
-        db.refresh(submission)
-
         assignment = db.query(Assignment).filter(Assignment.id == submission.assignment_id).first()
         if not assignment:
             logger.error("Assignment %s not found for submission %s", submission.assignment_id, submission_id)
             submission.status = "pending_eval"
             db.commit()
             return {"status": "assignment_not_found"}
+
+        if not assignment.ai_eval_enabled:
+            submission.status = "pending"
+            submission.ai_score = None
+            submission.mastery_level = None
+            submission.depth_score = None
+            submission.depth_label = None
+            submission.topic_scores = None
+            submission.integrity_score = None
+            submission.plagiarism_flag = False
+            submission.feedback_text = "AI evaluation is disabled for this assignment. Your teacher will review the submission."
+            db.commit()
+            return {"status": submission.status, "submission_id": submission_id, "reason": "ai_evaluation_disabled"}
+
+        submission.status = "evaluating"
+        db.commit()
+        db.refresh(submission)
 
         # Obtain extracted text
         extracted_text = submission.text_content or ""
@@ -158,7 +226,22 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
             submission_id,
         )
         submission.text_content = extracted_text
-        if not extracted_text.strip() and grade is _legacy_grade:
+        if len(extracted_text) > settings.MAX_AI_SUBMISSION_CHARS:
+            submission.status = "pending"
+            submission.ai_score = None
+            submission.mastery_level = None
+            submission.depth_score = None
+            submission.depth_label = None
+            submission.topic_scores = None
+            submission.integrity_score = None
+            submission.plagiarism_flag = False
+            submission.feedback_text = (
+                f"This file contains more than {settings.MAX_AI_SUBMISSION_CHARS:,} characters, "
+                "which exceeds the safe AI evaluation limit. No partial score was recorded; please ask your teacher to review it."
+            )
+            db.commit()
+            return {"status": submission.status, "submission_id": submission_id, "reason": "evaluation_input_too_large"}
+        if not extracted_text.strip():
             # Never convert an unreadable/unsupported upload into an AI zero.
             # Leave it for teacher review and tell the student what happened.
             submission.status = "pending"
@@ -182,6 +265,59 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
         max_retries = settings.WORKER_MAX_RETRIES
         backoff_delay = settings.WORKER_RETRY_DELAY * (2 ** (attempt - 1))
 
+        reference_solution = (
+            db.query(AssignmentReference.solution_text)
+            .filter(AssignmentReference.assignment_id == assignment.id)
+            .scalar()
+            or ""
+        )
+        assignment_context_query = "\n".join([
+            str(assignment.title or ""),
+            str(assignment.description or ""),
+            json.dumps(assignment.topics_list or [], ensure_ascii=False),
+            json.dumps(assignment.rubric or [], ensure_ascii=False),
+            reference_solution,
+        ])
+        reference_note_context = ""
+        if assignment.reference_note_id:
+            reference_note = (
+                db.query(Note)
+                .filter(
+                    Note.id == assignment.reference_note_id,
+                    Note.course_id == assignment.course_id,
+                )
+                .first()
+            )
+            if reference_note:
+                extracted_note = await _load_teacher_context_file(
+                    reference_note.file_key,
+                    f"{reference_note.title}{Path(reference_note.file_key).suffix}",
+                    reference_note.file_type,
+                )
+                excerpt = _select_context_excerpt(extracted_note, assignment_context_query, 800)
+                reference_note_context = f"{reference_note.title}: {excerpt}".strip()
+
+        attachment_rows = (
+            db.query(AssignmentAttachment)
+            .filter(AssignmentAttachment.assignment_id == assignment.id)
+            .order_by(AssignmentAttachment.created_at.asc())
+            .all()
+        )
+        attachment_semaphore = asyncio.Semaphore(3)
+
+        async def extract_attachment(item: AssignmentAttachment) -> str:
+            async with attachment_semaphore:
+                return await _load_teacher_context_file(item.file_path, item.file_name, item.mime_type)
+
+        attachment_texts = await asyncio.gather(*(extract_attachment(item) for item in attachment_rows))
+        chars_per_attachment = max(1, 1200 // max(len(attachment_rows), 1))
+        title_chars = max(8, chars_per_attachment // 3)
+        assignment_attachment_context = "\n".join(
+            f"{item.title[:title_chars]}: "
+            f"{_select_context_excerpt(content, assignment_context_query, max(0, chars_per_attachment - title_chars - 4))}"
+            for item, content in zip(attachment_rows, attachment_texts)
+        )
+
         try:
             # Run the Phase 4 LangGraph pipeline in a thread so blocking Groq,
             # ChromaDB, and embedding calls do not stall the ARQ event loop.
@@ -196,21 +332,21 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
                         "submission_id": str(submission.id),
                         "assignment_id": str(assignment.id),
                         "course_id": str(assignment.course_id),
+                        "assignment_title": assignment.title or "",
+                        "assignment_description": assignment.description or "",
                         "raw_text": extracted_text,
                         "rubric": assignment.rubric or [],
-                        "reference_solution": (
-                            db.query(AssignmentReference.solution_text)
-                            .filter(AssignmentReference.assignment_id == assignment.id)
-                            .scalar()
-                            or ""
-                        ),
+                        "reference_solution": reference_solution,
+                        "reference_note_id": str(assignment.reference_note_id) if assignment.reference_note_id else None,
+                        "reference_note_context": reference_note_context,
+                        "assignment_attachment_context": assignment_attachment_context,
                         "topics_list": assignment.topics_list or [],
                         "max_score": float(assignment.max_marks or 100),
                     },
                 )
                 mastery_result = evaluation_state.get("mastery_result", {})
                 grade_result = {
-                    "total_score": mastery_result.get("total_score", 0),
+                    "total_score": mastery_result.get("total_score"),
                     "max_score": mastery_result.get("max_score", assignment.max_marks or 100),
                     "breakdown": mastery_result.get("topic_scores", []),
                     "depth_score": mastery_result.get("depth_score"),
@@ -221,9 +357,28 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
                     "plagiarism_matches": evaluation_state.get("plagiarism_matches", []),
                 }
         except Exception as exc:
+            if isinstance(exc, (EvaluationOutputError, GroqConfigurationError, GroqRequestTooLarge)):
+                logger.error("Submission %s was not graded because the AI result was unavailable: %s", submission_id, exc)
+                submission.status = "pending"
+                submission.ai_score = None
+                submission.mastery_level = None
+                submission.depth_score = None
+                submission.depth_label = None
+                submission.topic_scores = None
+                submission.integrity_score = None
+                submission.plagiarism_flag = False
+                submission.feedback_text = (
+                    "AI could not produce a complete, safely bounded evaluation for this submission. "
+                    "No automated score was recorded; please ask your teacher to review it."
+                )
+                db.commit()
+                return {"status": submission.status, "submission_id": submission_id, "reason": "manual_review_required"}
             if _is_rate_limit_error(exc):
                 provider_wait = _rate_limit_retry_after_seconds(exc)
                 retry_delay = max(backoff_delay, provider_wait or 0)
+                submission.status = "pending_eval"
+                submission.feedback_text = "AI evaluation is queued and waiting for Groq capacity."
+                db.commit()
                 logger.warning(
                     "Groq 429 Rate Limit hit for submission %s on attempt %d/%d. Backing off for %ds%s.",
                     submission_id,
@@ -234,24 +389,40 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
                 )
                 if attempt < max_retries:
                     if ctx.get("is_fallback"):
+                        if retry_delay > 600:
+                            submission.status = "pending"
+                            submission.feedback_text = (
+                                "AI evaluation is delayed by the Groq account rate limit. "
+                                "Please retry evaluation later from the assignment."
+                            )
+                            db.commit()
+                            return {"status": submission.status, "submission_id": submission_id, "reason": "rate_limit_deferred"}
                         await asyncio.sleep(retry_delay)
                         ctx["job_try"] = attempt + 1
                         return await evaluate_submission_task(ctx, submission_id)
                     raise Retry(defer=retry_delay)
                 else:
                     logger.error("Exceeded max retries for submission %s due to rate limits.", submission_id)
-                    raise exc
+                    submission.status = "pending"
+                    submission.feedback_text = (
+                        "AI evaluation could not get Groq capacity after several retries. "
+                        "Please ask your teacher to retry it later."
+                    )
+                    db.commit()
+                    return {"status": submission.status, "submission_id": submission_id, "reason": "rate_limit_retries_exhausted"}
             else:
                 logger.exception("Unexpected error evaluating submission %s: %s", submission_id, exc)
+                if ctx.get("is_fallback") and attempt < max_retries:
+                    submission.status = "pending_eval"
+                    submission.feedback_text = "AI evaluation hit a temporary error and is retrying."
+                    db.commit()
+                    await asyncio.sleep(backoff_delay)
+                    ctx["job_try"] = attempt + 1
+                    return await evaluate_submission_task(ctx, submission_id)
                 raise exc
 
         if grade_result is None:
-            grade_result = {
-                "total_score": 0,
-                "max_score": assignment.max_marks or 100,
-                "breakdown": [],
-                "general_feedback": "Automated evaluation completed with default parameters.",
-            }
+            raise EvaluationOutputError("The grader returned no result; no score can be published.")
 
         if evaluation_state is not None:
             # Repeat the inexpensive integrity lookup after the long AI grading
@@ -262,6 +433,7 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
                     "submission_id": str(submission.id),
                     "assignment_id": str(assignment.id),
                     "raw_text": extracted_text,
+                    "integrity_embedding": evaluation_state.get("integrity_embedding", []),
                 },
             )
             evaluation_state.update(latest_integrity)
@@ -269,8 +441,16 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
             grade_result["plagiarism_flag"] = latest_integrity.get("plagiarism_flag", False)
             grade_result["plagiarism_matches"] = latest_integrity.get("plagiarism_matches", [])
 
-        ai_score_val = float(grade_result.get("total_score", 0))
+        try:
+            ai_score_val = float(grade_result["total_score"])
+            if not math.isfinite(ai_score_val):
+                raise ValueError("Non-finite AI score")
+        except (KeyError, TypeError, ValueError) as exc:
+            raise EvaluationOutputError("The grader returned an invalid total score.") from exc
         max_score_val = float(assignment.max_marks or grade_result.get("max_score", 100))
+        if not math.isfinite(max_score_val) or max_score_val <= 0:
+            raise EvaluationOutputError("Assignment maximum score must be greater than zero.")
+        ai_score_val = max(0.0, min(max_score_val, ai_score_val))
         mastery_lvl = _compute_mastery_level(ai_score_val, max_score_val)
         feedback_txt = grade_result.get("general_feedback") or ""
         topic_sc = grade_result.get("breakdown")
@@ -278,6 +458,20 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
         # Plagiarism / integrity assessment
         integrity_sc = float(grade_result.get("integrity_score", 1.0))
         plagiarism_flag_val = bool(grade_result.get("plagiarism_flag", False))
+
+        db.refresh(assignment)
+        if not assignment.ai_eval_enabled:
+            submission.status = "pending"
+            submission.ai_score = None
+            submission.mastery_level = None
+            submission.depth_score = None
+            submission.depth_label = None
+            submission.topic_scores = None
+            submission.integrity_score = None
+            submission.plagiarism_flag = False
+            submission.feedback_text = "AI evaluation was disabled while this submission was processing. Your teacher will review it."
+            db.commit()
+            return {"status": submission.status, "submission_id": submission_id, "reason": "ai_evaluation_disabled"}
 
         submission.ai_score = ai_score_val
         submission.mastery_level = mastery_lvl
@@ -369,8 +563,15 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
         try:
             db.rollback()
             sub = db.query(Submission).filter(Submission.id == uuid.UUID(submission_id)).first()
-            if sub and sub.status == "evaluating":
-                sub.status = "pending_eval"
+            if sub and sub.status in {"evaluating", "pending_eval"}:
+                if int(ctx.get("job_try", 1)) >= settings.WORKER_MAX_RETRIES:
+                    sub.status = "pending"
+                    sub.feedback_text = (
+                        "AI evaluation failed after automatic retries. No new score was recorded; "
+                        "please ask your teacher to review it or retry later."
+                    )
+                else:
+                    sub.status = "pending_eval"
                 db.commit()
         except Exception:
             db.rollback()
@@ -378,6 +579,27 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
     except Retry:
         raise
     except Exception as exc:
+        if isinstance(exc, (EvaluationOutputError, GroqConfigurationError, GroqRequestTooLarge)):
+            logger.error("Submission %s requires teacher review because AI grading failed safely: %s", submission_id, exc)
+            try:
+                sub = db.query(Submission).filter(Submission.id == uuid.UUID(submission_id)).first()
+                if sub:
+                    sub.status = "pending"
+                    sub.ai_score = None
+                    sub.mastery_level = None
+                    sub.depth_score = None
+                    sub.depth_label = None
+                    sub.topic_scores = None
+                    sub.integrity_score = None
+                    sub.plagiarism_flag = False
+                    sub.feedback_text = (
+                        "AI could not produce a complete, safely bounded evaluation for this submission. "
+                        "No automated score was recorded; please ask your teacher to review it."
+                    )
+                    db.commit()
+                    return {"status": sub.status, "submission_id": submission_id, "reason": "manual_review_required"}
+            except Exception:
+                db.rollback()
         logger.exception("Failure in evaluate_submission_task for %s: %s", submission_id, exc)
         try:
             # Leave in pending_eval or flagged depending on error
@@ -570,9 +792,9 @@ class WorkerSettings:
     on_startup = startup
     on_shutdown = shutdown
     redis_settings = get_redis_settings()
-    # Long submissions make several paced model calls; process one evaluation
-    # at a time to reduce Groq 429s and avoid overlapping integrity writes.
-    max_jobs = 1
+    # Shared Redis pacing protects the account budget while modest concurrency
+    # keeps extraction and embedding work from serializing an entire class.
+    max_jobs = settings.WORKER_MAX_JOBS
     job_timeout = 900
     max_tries = settings.WORKER_MAX_RETRIES
     cron_jobs = (

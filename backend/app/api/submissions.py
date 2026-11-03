@@ -30,13 +30,6 @@ compat_router = APIRouter(tags=["submissions"])
 logger = logging.getLogger("vidyaranya.submissions")
 
 
-async def _enqueue_submission_evaluation(submission_id: uuid.UUID) -> None:
-    try:
-        await queue_service.enqueue_submission_evaluation(submission_id)
-    except Exception:
-        logger.exception("Could not enqueue submission evaluation for %s", submission_id)
-
-
 async def _delete_previous_submission_file(file_key: str) -> None:
     try:
         await asyncio.to_thread(storage_service.delete_file, file_key)
@@ -262,7 +255,7 @@ async def _handle_submission(
             student_id=current_user.id,
             file_key=saved_key,
             text_content=extracted_text,
-            status="pending_eval",
+            status="pending_eval" if assignment.ai_eval_enabled else "pending",
             ai_score=None,
             mastery_level=None,
             depth_score=None,
@@ -279,7 +272,7 @@ async def _handle_submission(
         previous_path = submission.file_key
         submission.file_key = saved_key
         submission.text_content = extracted_text
-        submission.status = "pending_eval"
+        submission.status = "pending_eval" if assignment.ai_eval_enabled else "pending"
         submission.ai_score = None
         submission.mastery_level = None
         submission.depth_score = None
@@ -288,6 +281,8 @@ async def _handle_submission(
         submission.feedback_text = None
         submission.final_score = None
         submission.faculty_note = None
+        submission.integrity_score = None
+        submission.plagiarism_flag = False
 
     db.flush()
 
@@ -315,10 +310,22 @@ async def _handle_submission(
     db.commit()
     db.refresh(submission)
 
-    # Decoupled Asynchronous Evaluation Queue (Phase 3)
-    # Do not wait for Redis connection setup in the HTTP request. The API can
-    # return pending_eval immediately while this task hands work to ARQ.
-    asyncio.create_task(_enqueue_submission_evaluation(submission.id))
+    if assignment.ai_eval_enabled:
+        # Confirm queue dispatch so a transient Redis failure cannot leave a
+        # submission indefinitely marked as waiting for an unqueued job.
+        try:
+            await queue_service.enqueue_submission_evaluation(submission.id)
+        except Exception:
+            logger.exception("Could not enqueue submission evaluation for %s", submission.id)
+            submission.status = "pending"
+            submission.feedback_text = (
+                "Your submission was saved, but the AI queue is unavailable. "
+                "Please ask your teacher to review it or retry evaluation later."
+            )
+            db.commit()
+    else:
+        submission.feedback_text = "AI evaluation is disabled for this assignment. Your teacher will review the submission."
+        db.commit()
 
     return {
         "id": submission.id,

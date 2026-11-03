@@ -19,6 +19,14 @@ class Settings(BaseSettings):
     ENABLE_DEV_LOGIN: bool = True
     GROQ_API_KEY: str = ""
     GROQ_MODEL: str = "openai/gpt-oss-20b"
+    # Keep application traffic below the conservative Groq free-plan envelope.
+    # These are shared by grading, tutoring, and analytics; override only when
+    # the exact organization limits on Groq's Limits page are lower.
+    GROQ_TPM_BUDGET: int = 6500
+    GROQ_RPM_BUDGET: int = 25
+    GROQ_RPD_BUDGET: int = 900
+    GROQ_MAX_COMPLETION_TOKENS: int = 1200
+    MAX_AI_SUBMISSION_CHARS: int = 45000
     GOOGLE_CLIENT_ID: str = ""
     GOOGLE_CLIENT_SECRET: str = ""
     BACKEND_CORS_ORIGINS: list[str] = ["http://localhost", "http://localhost:80"]
@@ -37,6 +45,7 @@ class Settings(BaseSettings):
     REDIS_MAX_CONNECTIONS: int = 10
     WORKER_MAX_RETRIES: int = 5
     WORKER_RETRY_DELAY: int = 2
+    WORKER_MAX_JOBS: int = 2
     QUEUE_MODE: str = "auto"
 
     @property
@@ -74,6 +83,20 @@ class Settings(BaseSettings):
         if isinstance(value, list):
             return [str(item) for item in value]
         return ["http://localhost", "http://localhost:80"]
+
+    @field_validator(
+        "GROQ_TPM_BUDGET",
+        "GROQ_RPM_BUDGET",
+        "GROQ_RPD_BUDGET",
+        "GROQ_MAX_COMPLETION_TOKENS",
+        "MAX_AI_SUBMISSION_CHARS",
+        "WORKER_MAX_JOBS",
+    )
+    @classmethod
+    def positive_runtime_limits(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("Runtime limits must be positive integers")
+        return value
 
     @field_validator("FRONTEND_ALLOWED_HOSTS", mode="before")
     @classmethod
