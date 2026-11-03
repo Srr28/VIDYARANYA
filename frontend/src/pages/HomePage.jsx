@@ -91,7 +91,7 @@ function CourseCard({ course, currentUserId, nextDue, showNextDue = false }) {
           </p>
         )}
         {showNextDue && (
-          <p className="truncate text-xs text-muted-foreground" title={nextDue.title}>
+          <p className="truncate text-xs text-muted-foreground" title={nextDue?.title || 'No work due soon'}>
             {nextDue ? <><span className="font-semibold text-foreground">Due {nextDue.due_date ? new Date(nextDue.due_date).toLocaleDateString() : 'soon'}</span>{' · '}{nextDue.title}</> : 'No work due soon'}
           </p>
         )}
