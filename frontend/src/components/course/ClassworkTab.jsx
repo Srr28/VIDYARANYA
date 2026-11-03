@@ -598,11 +598,7 @@ function SubmitModal({ assignment, onClose, onSubmitted }) {
       <form onSubmit={handleSubmit} className="space-y-4">
         <div className="p-4 rounded-xl bg-secondary  border border-primary ">
           <p className="text-sm text-primary ">
-            {assignment.ai_eval_enabled !== false ? (
-              <><strong>AI Evaluation Enabled</strong> — Your submission will be automatically graded after upload.</>
-            ) : (
-              <><strong>Teacher review</strong> — AI evaluation is disabled for this assignment. Your teacher will review your submission.</>
-            )}
+            <strong>AI Evaluation Enabled</strong> — Your submission will be automatically graded by the multi-agent system after upload.
           </p>
         </div>
         <div>

@@ -252,16 +252,6 @@ Benefits:
 
 ---
 
-## Render Deployment
-
-The backend Docker image starts both Uvicorn and the ARQ job consumer with `backend/start_render.py`. This is required for asynchronous assignment evaluation, note indexing, and class analytics to run; an API-only process accepts submissions but cannot consume Redis jobs. If the Render service has a custom Start Command that runs only Uvicorn, clear that override and use the Dockerfile command. Configure the same `DATABASE_URL`, `REDIS_URL`, `GROQ_API_KEY`, and Groq budget variables on the Render service. The API and worker share the service's Chroma files in this single-service setup. Mount a Render persistent disk at `/app/chroma_db` if indexed course materials must survive deploys and restarts.
-
-For a separate Render worker service, use `arq app.worker.WorkerSettings` and configure it with the same database, Redis, storage, and AI environment variables. Move Chroma to shared persistent storage or a shared vector database before splitting services; the current local Chroma directory is not shared across Render instances.
-
-Evaluation is bounded by shared application budgets (`GROQ_TPM_BUDGET`, `GROQ_RPM_BUDGET`, and `GROQ_RPD_BUDGET`). Set them no higher than the limits displayed for the Groq organization. Jobs stay queued when short-term capacity is exhausted, and unusable AI output is sent for teacher review without recording a fabricated zero.
-
----
-
 ## Output and Data
 
 Runtime data locations:

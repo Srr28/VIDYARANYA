@@ -161,12 +161,8 @@ def extract_text(file_path: str, mime_type: str = "") -> str:
 
     is_pdf = "pdf" in mime or suffix == ".pdf"
     is_docx = "word" in mime or "docx" in mime or suffix == ".docx"
-    is_image = "image" in mime or suffix in [".png", ".jpg", ".jpeg", ".gif", ".tif", ".tiff", ".bmp", ".webp"]
-    is_text = mime.startswith("text/") or "plain" in mime or suffix in [
-        ".txt", ".md", ".csv", ".json", ".py", ".ipynb", ".html", ".xml", ".yaml", ".yml",
-        ".js", ".jsx", ".ts", ".tsx", ".java", ".c", ".cc", ".cpp", ".h", ".hpp", ".cs",
-        ".go", ".rs", ".php", ".rb", ".swift", ".kt", ".kts", ".sql", ".sh", ".css",
-    ]
+    is_image = "image" in mime or suffix in [".png", ".jpg", ".jpeg", ".tiff", ".bmp", ".webp"]
+    is_text = mime.startswith("text/") or "plain" in mime or suffix in [".txt", ".md", ".csv", ".json"]
 
     extracted_text = ""
 
@@ -229,12 +225,8 @@ def extract_text_from_bytes(data: bytes, mime_type: str = "", filename: str = ""
     is_pdf = "pdf" in mime or suffix == ".pdf"
     is_docx = "word" in mime or "docx" in mime or suffix == ".docx"
     is_office_xml = suffix in {".pptx", ".xlsx"}
-    is_image = "image" in mime or suffix in [".png", ".jpg", ".jpeg", ".gif", ".tif", ".tiff", ".bmp", ".webp"]
-    is_text = mime.startswith("text/") or "plain" in mime or suffix in [
-        ".txt", ".md", ".csv", ".json", ".py", ".ipynb", ".html", ".xml", ".yaml", ".yml",
-        ".js", ".jsx", ".ts", ".tsx", ".java", ".c", ".cc", ".cpp", ".h", ".hpp", ".cs",
-        ".go", ".rs", ".php", ".rb", ".swift", ".kt", ".kts", ".sql", ".sh", ".css",
-    ]
+    is_image = "image" in mime or suffix in [".png", ".jpg", ".jpeg", ".tiff", ".bmp", ".webp"]
+    is_text = mime.startswith("text/") or "plain" in mime or suffix in [".txt", ".md", ".csv", ".json"]
 
     extracted_text = ""
 

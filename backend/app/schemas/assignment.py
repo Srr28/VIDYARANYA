@@ -35,11 +35,8 @@ class AssignmentCreate(BaseModel):
             points = [float(item.get("max_points", 0)) for item in self.rubric]
         except (AttributeError, TypeError, ValueError) as exc:
             raise ValueError("Each rubric criterion must include numeric max_points") from exc
-        names = [" ".join(str(item.get("criterion", "")).split()).casefold() for item in self.rubric]
-        if any(not name or value < 0 for name, value in zip(names, points)):
+        if any(not str(item.get("criterion", "")).strip() or value < 0 for item, value in zip(self.rubric, points)):
             raise ValueError("Rubric criteria need a name and non-negative points")
-        if len(names) != len(set(names)):
-            raise ValueError("Rubric criterion names must be unique")
         if abs(sum(points) - self.max_marks) > 0.001:
             raise ValueError("Rubric points must add up to max_marks")
         return self
@@ -116,9 +113,6 @@ class AssignmentUpdate(BaseModel):
             points = [float(item.get("max_points", 0)) for item in self.rubric]
         except (AttributeError, TypeError, ValueError) as exc:
             raise ValueError("Each rubric criterion must include numeric max_points") from exc
-        names = [" ".join(str(item.get("criterion", "")).split()).casefold() for item in self.rubric]
-        if any(not name or value < 0 for name, value in zip(names, points)):
+        if any(not str(item.get("criterion", "")).strip() or value < 0 for item, value in zip(self.rubric, points)):
             raise ValueError("Rubric criteria need a name and non-negative points")
-        if len(names) != len(set(names)):
-            raise ValueError("Rubric criterion names must be unique")
         return self
