@@ -105,6 +105,11 @@ class BloomDepth(BaseModel):
     label: str = "surface"
 
 
+def _norm_criterion(value: Any) -> str:
+    """Normalize criterion labels for case- and whitespace-insensitive matching."""
+    return " ".join(str(value or "").split()).casefold()
+
+
 def _client():
     if Groq is None or not settings.GROQ_API_KEY:
         return None
@@ -468,13 +473,13 @@ def coverage_node(state: EvaluationState) -> EvaluationState:
                 per_chunk.append([])
                 continue
             parsed_topics = [item.model_dump() for item in parsed.topics]
-            expected = {topic.casefold(): topic for topic in topics}
+            expected = {_norm_criterion(topic): topic for topic in topics}
             # Models sometimes echo an assignment tag or the literal "None"
             # instead of a rubric criterion. Keep results by exact name where
             # possible, and use response order only when counts align.
             for topic_index, item in enumerate(parsed_topics):
                 label = str(item.get("topic") or "").strip()
-                canonical = expected.get(label.casefold())
+                canonical = expected.get(_norm_criterion(label))
                 if canonical is None and len(parsed_topics) == len(topics) and topic_index < len(topics):
                     canonical = topics[topic_index]
                 if canonical is not None:
@@ -501,7 +506,7 @@ def coverage_node(state: EvaluationState) -> EvaluationState:
             item
             for chunk_result in per_chunk
             for item in chunk_result
-            if str(item.get("topic", "")).strip().lower() == str(topic).strip().lower()
+            if _norm_criterion(item.get("topic")) == _norm_criterion(topic)
         ]
         if not matches:
             coverage.append({"topic": topic, "score": 0.0, "evidence": [], "missing": ["No structured coverage result"]})
@@ -575,9 +580,9 @@ def coverage_node(state: EvaluationState) -> EvaluationState:
             final_result = _clamp_coverage_scores(final_result, str(state.get("submission_id", "unknown")), "final synthesis")
             try:
                 final_coverage = TopicCoverageList.model_validate(final_result).topics
-                final_by_topic = {item.topic.strip().lower(): item for item in final_coverage}
+                final_by_topic = {_norm_criterion(item.topic): item for item in final_coverage}
                 for topic_index, item in enumerate(coverage):
-                    final_item = final_by_topic.get(str(item["topic"]).strip().lower())
+                    final_item = final_by_topic.get(_norm_criterion(item["topic"]))
                     if final_item is None and len(final_coverage) == len(coverage) and topic_index < len(final_coverage):
                         final_item = final_coverage[topic_index]
                     if final_item is not None:
@@ -610,13 +615,13 @@ def mastery_node(state: EvaluationState) -> EvaluationState:
     coverage = state.get("topic_coverage", [])
     rubric = state.get("rubric", [])
     maximum = float(state.get("max_score") or sum(float(item.get("max_points", 0)) for item in rubric) or 100)
-    by_topic = {str(item.get("topic", "")).strip().lower(): item for item in coverage}
+    by_topic = {_norm_criterion(item.get("topic")): item for item in coverage}
     topic_scores: list[dict[str, Any]] = []
     total = 0.0
     for item in rubric or [{"criterion": item.get("topic", "General"), "max_points": maximum} for item in coverage]:
         topic = str(item.get("criterion") or item.get("topic") or "General")
         max_points = float(item.get("max_points", item.get("max_score", 0)) or 0)
-        match = by_topic.get(topic.lower(), {})
+        match = by_topic.get(_norm_criterion(topic), {})
         coverage_score = float(match.get("score", 0) or 0)
         awarded = max_points * max(0.0, min(10.0, coverage_score)) / 10.0
         total += awarded
