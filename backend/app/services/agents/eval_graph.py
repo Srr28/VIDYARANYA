@@ -245,7 +245,8 @@ def _clamp_coverage_scores(result: dict[str, Any], submission_id: str, stage: st
     return result
 
 
-def router_node(state: EvaluationState) -> EvaluationState:
+def prepare_node(state: EvaluationState) -> EvaluationState:
+    """Validate and deterministically prepare the grading plan without an LLM call."""
     required = ["submission_id", "assignment_id", "course_id", "raw_text"]
     missing = [key for key in required if not state.get(key)]
     if missing:
@@ -257,43 +258,11 @@ def router_node(state: EvaluationState) -> EvaluationState:
         ).count()
     except Exception:
         course_material_count = 0
-
-    result = _ask_json(
-        settings.GROQ_MODEL,
-        "You are an evaluation workflow router. Return JSON only with an execution_plan array. "
-        "The plan must include integrity, coverage, and mastery exactly once, in that dependency order. "
-        "Then choose exactly one feedback step: rag_feedback if course materials are available and can "
-        "help explain likely learning gaps, otherwise rubric_feedback. Never include unknown steps.",
-        f"Topics: {state.get('topics_list', [])}\nRubric: {state.get('rubric', [])}\n"
-        f"Teacher reference solution supplied: {bool(state.get('reference_solution'))}\n"
-        f"Indexed course material chunks available: {course_material_count}",
-    )
-    requested = result.get("execution_plan") if isinstance(result.get("execution_plan"), list) else []
-    requested = [str(item).strip().lower() for item in requested]
-    required = {"integrity", "coverage", "mastery"}
-    valid_steps = required | {"rag_feedback", "rubric_feedback"}
-    has_valid_steps = (
-        len(requested) == len(set(requested))
-        and set(requested).issubset(valid_steps)
-        and required.issubset(requested)
-        and requested.index("integrity") < requested.index("coverage") < requested.index("mastery")
-        and requested.index("mastery") < len(requested) - 1
-        and requested[-1] in {"rag_feedback", "rubric_feedback"}
-        and ("rag_feedback" in requested) != ("rubric_feedback" in requested)
-    )
-    if has_valid_steps:
-        plan = requested
-    else:
-        # If the model cannot return a safe plan, use grounded feedback whenever
-        # indexed materials exist, and rubric-only feedback otherwise.
-        feedback_step = "rag_feedback" if course_material_count else "rubric_feedback"
-        plan = ["integrity", "coverage", "mastery", feedback_step]
-
-    if not course_material_count and "rag_feedback" in plan:
-        plan = [step for step in plan if step != "rag_feedback"] + ["rubric_feedback"]
+    feedback_step = "rag_feedback" if course_material_count > 0 else "rubric_feedback"
+    plan = ["integrity", "coverage", "mastery", feedback_step]
 
     logger.info(
-        "Evaluation router selected plan for submission %s: %s",
+        "Evaluation preparation selected plan for submission %s: %s",
         state["submission_id"],
         plan,
     )
@@ -794,7 +763,7 @@ def _next_plan_route(state: EvaluationState) -> str:
 
 def _run_sequential(initial: EvaluationState) -> EvaluationState:
     state = dict(initial)
-    state.update(router_node(state))
+    state.update(prepare_node(state))
     while int(state.get("execution_step", 0)) < len(state.get("execution_plan", [])):
         state.update(execute_plan_node(state))
     state.update(finalize_node(state))
@@ -805,11 +774,11 @@ def build_evaluation_graph():
     if StateGraph is None:
         return None
     graph = StateGraph(EvaluationState)
-    graph.add_node("router", router_node)
+    graph.add_node("prepare", prepare_node)
     graph.add_node("execute_plan", execute_plan_node)
     graph.add_node("finalize", finalize_node)
-    graph.set_entry_point("router")
-    graph.add_edge("router", "execute_plan")
+    graph.set_entry_point("prepare")
+    graph.add_edge("prepare", "execute_plan")
     graph.add_conditional_edges(
         "execute_plan",
         _next_plan_route,
