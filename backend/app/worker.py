@@ -23,12 +23,10 @@ from app.core.database import SessionLocal, engine
 from app.db.phase4_schema import ensure_submission_depth_columns
 from app.models.analytics_report import AnalyticsReport
 from app.models.assignment import Assignment
-from app.models.assignment_reference import AssignmentReference
 from app.models.course import Course
 from app.models.note import Note
 from app.models.submission import Submission
 from app.models.submission_text import SubmissionText
-from app.services.agents.eval_graph import integrity_node, run_evaluation_graph
 from app.services.grading_service import grade
 from app.services.ocr_service import extract_text_from_bytes
 from app.services.queue_service import get_redis_settings, queue_service
@@ -36,7 +34,6 @@ from app.services.rag_service import index_note
 from app.services.storage_service import storage_service
 
 logger = logging.getLogger("vidyaranya.worker")
-_legacy_grade = grade
 
 try:
     from arq import cron
@@ -158,7 +155,7 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
             submission_id,
         )
         submission.text_content = extracted_text
-        if not extracted_text.strip() and grade is _legacy_grade:
+        if not extracted_text.strip():
             # Never convert an unreadable/unsupported upload into an AI zero.
             # Leave it for teacher review and tell the student what happened.
             submission.status = "pending"
@@ -176,50 +173,15 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
             db.commit()
             return {"status": submission.status, "submission_id": submission_id, "reason": "no_readable_text"}
 
-        # Run AI grading with rate-limit retry logic
+        # Keep production grading to one rubric-based model request. The former
+        # graph made several LLM calls and required Redis for its integrity lock,
+        # which made submissions remain pending on deployments without Redis.
         grade_result = None
-        evaluation_state: dict[str, Any] | None = None
         max_retries = settings.WORKER_MAX_RETRIES
         backoff_delay = settings.WORKER_RETRY_DELAY * (2 ** (attempt - 1))
 
         try:
-            # Run the Phase 4 LangGraph pipeline in a thread so blocking Groq,
-            # ChromaDB, and embedding calls do not stall the ARQ event loop.
-            if grade is not _legacy_grade:
-                # Compatibility hook for existing tests and explicitly mocked
-                # legacy grading integrations. Production uses the graph below.
-                grade_result = await asyncio.to_thread(grade, extracted_text, assignment.rubric or [])
-            else:
-                evaluation_state = await asyncio.to_thread(
-                    run_evaluation_graph,
-                    {
-                        "submission_id": str(submission.id),
-                        "assignment_id": str(assignment.id),
-                        "course_id": str(assignment.course_id),
-                        "raw_text": extracted_text,
-                        "rubric": assignment.rubric or [],
-                        "reference_solution": (
-                            db.query(AssignmentReference.solution_text)
-                            .filter(AssignmentReference.assignment_id == assignment.id)
-                            .scalar()
-                            or ""
-                        ),
-                        "topics_list": assignment.topics_list or [],
-                        "max_score": float(assignment.max_marks or 100),
-                    },
-                )
-                mastery_result = evaluation_state.get("mastery_result", {})
-                grade_result = {
-                    "total_score": mastery_result.get("total_score", 0),
-                    "max_score": mastery_result.get("max_score", assignment.max_marks or 100),
-                    "breakdown": mastery_result.get("topic_scores", []),
-                    "depth_score": mastery_result.get("depth_score"),
-                    "depth_label": mastery_result.get("depth_label"),
-                    "general_feedback": evaluation_state.get("feedback_markdown", ""),
-                    "integrity_score": evaluation_state.get("integrity_score", 1.0),
-                    "plagiarism_flag": evaluation_state.get("plagiarism_flag", False),
-                    "plagiarism_matches": evaluation_state.get("plagiarism_matches", []),
-                }
+            grade_result = await asyncio.to_thread(grade, extracted_text, assignment.rubric or [])
         except Exception as exc:
             if _is_rate_limit_error(exc):
                 provider_wait = _rate_limit_retry_after_seconds(exc)
@@ -253,30 +215,15 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
                 "general_feedback": "Automated evaluation completed with default parameters.",
             }
 
-        if evaluation_state is not None:
-            # Repeat the inexpensive integrity lookup after the long AI grading
-            # calls so concurrent submissions have had time to enter the index.
-            latest_integrity = await asyncio.to_thread(
-                integrity_node,
-                {
-                    "submission_id": str(submission.id),
-                    "assignment_id": str(assignment.id),
-                    "raw_text": extracted_text,
-                },
-            )
-            evaluation_state.update(latest_integrity)
-            grade_result["integrity_score"] = latest_integrity.get("integrity_score", 1.0)
-            grade_result["plagiarism_flag"] = latest_integrity.get("plagiarism_flag", False)
-            grade_result["plagiarism_matches"] = latest_integrity.get("plagiarism_matches", [])
-
-        ai_score_val = float(grade_result.get("total_score", 0))
         max_score_val = float(assignment.max_marks or grade_result.get("max_score", 100))
+        ai_score_val = max(0.0, min(max_score_val, float(grade_result.get("total_score", 0))))
         mastery_lvl = _compute_mastery_level(ai_score_val, max_score_val)
         feedback_txt = grade_result.get("general_feedback") or ""
         topic_sc = grade_result.get("breakdown")
 
-        # Plagiarism / integrity assessment
-        integrity_sc = float(grade_result.get("integrity_score", 1.0))
+        # This lightweight grader does not run a separate plagiarism pipeline.
+        integrity_value = grade_result.get("integrity_score")
+        integrity_sc = float(integrity_value) if integrity_value is not None else None
         plagiarism_flag_val = bool(grade_result.get("plagiarism_flag", False))
 
         submission.ai_score = ai_score_val
@@ -288,38 +235,6 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
         submission.integrity_score = integrity_sc
         submission.plagiarism_flag = plagiarism_flag_val
         submission.status = "flagged" if plagiarism_flag_val else "graded"
-
-        # If a previously graded peer is found to match this submission, flag
-        # that peer for teacher review too. In-flight peers will run the final
-        # lookup above before saving their own result.
-        for match in grade_result.get("plagiarism_matches", []):
-            similarity = float(match.get("similarity", 0) or 0)
-            if similarity <= 0.85:
-                continue
-            try:
-                matched_id = uuid.UUID(str(match.get("submission_id", "")))
-            except (ValueError, TypeError, AttributeError):
-                continue
-            if matched_id == submission.id:
-                continue
-            matched_submission = (
-                db.query(Submission)
-                .filter(
-                    Submission.id == matched_id,
-                    Submission.assignment_id == assignment.id,
-                )
-                .first()
-            )
-            if matched_submission and matched_submission.status in {"graded", "flagged"}:
-                matched_submission.plagiarism_flag = True
-                matched_submission.status = "flagged"
-                peer_integrity = max(0.0, min(1.0, 1.0 - similarity))
-                matched_submission.integrity_score = min(
-                    float(matched_submission.integrity_score)
-                    if matched_submission.integrity_score is not None
-                    else 1.0,
-                    peer_integrity,
-                )
 
         # Update or create submission_texts record
         sub_text = db.query(SubmissionText).filter(SubmissionText.submission_id == submission.id).first()
