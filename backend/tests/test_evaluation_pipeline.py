@@ -1,3 +1,7 @@
+from types import SimpleNamespace
+
+import pytest
+
 from app.services.agents import eval_graph
 
 
@@ -78,7 +82,7 @@ def test_single_chunk_uses_one_grade_call_and_returns_mastery_shape(monkeypatch)
 def test_three_chunks_use_one_grade_call_each_and_one_synthesis(monkeypatch):
     calls = []
 
-    def ask(model, system, user):
+    def ask(model, system, user, **_kwargs):
         calls.append(system)
         return {"c": [{"t": "Criterion", "s": 7, "e": ["support"], "m": ["detail"]}],
                 "b": {"s": 3, "l": "applied"}}
@@ -133,3 +137,71 @@ def test_feedback_context_is_limited_to_three_400_char_chunks(monkeypatch):
     context = captured[0].split("Course context (max 3 chunks, 400 chars each):\n", 1)[1]
     assert context.count("[Topic ") == 3
     assert context.count("x" * 401) == 0
+
+
+def test_limiter_reconciles_estimate_with_actual_usage(monkeypatch):
+    eval_graph._GROQ_TOKEN_RESERVATIONS.clear()
+
+    class RawResponse:
+        headers = {}
+
+        def parse(self):
+            return SimpleNamespace(
+                usage=SimpleNamespace(prompt_tokens=900, completion_tokens=300, total_tokens=1200),
+                choices=[SimpleNamespace(message=SimpleNamespace(content='{"ok":true}'))],
+            )
+
+    class Completions:
+        class WithRaw:
+            @staticmethod
+            def create(**kwargs):
+                assert kwargs["reasoning_effort"] == "low"
+                assert kwargs["response_format"] == {"type": "json_object"}
+                return RawResponse()
+
+        with_raw_response = WithRaw()
+
+    monkeypatch.setattr(eval_graph, "_client", lambda: SimpleNamespace(chat=SimpleNamespace(completions=Completions())))
+    monkeypatch.setattr(eval_graph, "_record_daily_token_usage", lambda _count: None)
+    user = "u" * 8400  # 2,100 estimated prompt tokens + 900 output = 3,000 reserved.
+    assert eval_graph._ask_json("model-a", "", user) == {"ok": True}
+    reservation = list(eval_graph._GROQ_TOKEN_RESERVATIONS["model-a"])[-1]
+    assert reservation.tokens == 1200
+
+
+def test_daily_budget_gate_defers_at_90_percent_and_allows_50_percent(monkeypatch):
+    monkeypatch.setattr(eval_graph.settings, "GROQ_DAILY_TOKEN_BUDGET", 100_000)
+    monkeypatch.setattr(eval_graph, "_read_daily_token_usage", lambda: 90_000)
+    with pytest.raises(eval_graph.GroqDailyBudgetDeferred):
+        eval_graph._check_daily_token_budget()
+
+    monkeypatch.setattr(eval_graph, "_read_daily_token_usage", lambda: 50_000)
+    eval_graph._check_daily_token_budget()
+
+
+def test_invalid_grading_json_retries_once_then_returns_safe_zero(monkeypatch):
+    calls = []
+
+    def ask(_model, _system, _user, **_kwargs):
+        calls.append(True)
+        return {}
+
+    monkeypatch.setattr(eval_graph, "_ask_json", ask)
+    result = eval_graph.grade_node({
+        "submission_id": "sub-invalid", "raw_text": "answer",
+        "rubric": [{"criterion": "Criterion", "max_points": 10}], "max_score": 10,
+    })
+    assert len(calls) == 2
+    assert result["mastery_result"]["total_score"] == 0
+    assert result["mastery_result"]["topic_scores"][0]["missing"] == ["Evaluation response could not be parsed"]
+
+
+def test_rate_headers_record_remaining_tokens_and_reset(monkeypatch):
+    eval_graph._GROQ_PROVIDER_LIMITS.pop("model-header", None)
+    eval_graph._read_rate_headers({
+        "x-ratelimit-remaining-tokens": "1200",
+        "x-ratelimit-reset-tokens": "1m2.5s",
+    }, "model-header")
+    remaining, reset_at = eval_graph._GROQ_PROVIDER_LIMITS["model-header"]
+    assert remaining == 1200
+    assert reset_at > eval_graph.time.monotonic() + 60

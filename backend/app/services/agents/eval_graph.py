@@ -17,6 +17,8 @@ import threading
 import time
 from collections import deque
 from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from pydantic import BaseModel, Field, ValidationError
@@ -29,12 +31,21 @@ logger = logging.getLogger("vidyaranya.evaluation")
 MAX_GROQ_USER_CHARS = 12000
 SUBMISSION_CHUNK_CHARS = 4500
 SUBMISSION_CHUNK_OVERLAP = 350
-GROQ_ESTIMATED_TPM_BUDGET = 6500
-_GROQ_TOKEN_RESERVATIONS: deque[tuple[float, int]] = deque()
+@dataclass
+class _TokenReservation:
+    created_at: float
+    tokens: int
+
+
+_GROQ_TOKEN_RESERVATIONS: dict[str, deque[_TokenReservation]] = {}
+_GROQ_PROVIDER_LIMITS: dict[str, tuple[int, float]] = {}
 _GROQ_RATE_LIMIT_LOCK = threading.Lock()
+_GROQ_STATS_LOCAL = threading.local()
 _INTEGRITY_INDEX_LOCK = threading.Lock()
 _REDIS_LOCK_CLIENT: Any | None = None
 _REDIS_LOCK_CLIENT_GUARD = threading.Lock()
+_GROQ_REDIS_CLIENT: Any | None = None
+_GROQ_REDIS_CLIENT_GUARD = threading.Lock()
 
 try:
     from langgraph.graph import END, StateGraph
@@ -105,6 +116,14 @@ class BloomDepth(BaseModel):
     label: str = "surface"
 
 
+class GroqDailyBudgetDeferred(Exception):
+    """Evaluation should remain queued until the daily Groq budget resets."""
+
+    def __init__(self, defer_seconds: int) -> None:
+        self.defer_seconds = max(1, min(3600, int(defer_seconds)))
+        super().__init__("Groq daily token budget is nearly exhausted")
+
+
 def _norm_criterion(value: Any) -> str:
     """Normalize criterion labels for case- and whitespace-insensitive matching."""
     return " ".join(str(value or "").split()).casefold()
@@ -113,7 +132,7 @@ def _norm_criterion(value: Any) -> str:
 def _client():
     if Groq is None or not settings.GROQ_API_KEY:
         return None
-    return Groq(api_key=settings.GROQ_API_KEY)
+    return Groq(api_key=settings.GROQ_API_KEY, max_retries=0)
 
 
 def _extract_json(text: str) -> dict[str, Any]:
@@ -133,47 +152,183 @@ def _extract_json(text: str) -> dict[str, Any]:
             return {}
 
 
-def _reserve_groq_token_budget(system: str, user: str) -> None:
-    """Pace this worker below the observed provider TPM ceiling."""
-    # Character-based estimate reserves room for the model's JSON response.
-    estimated_tokens = math.ceil((len(system) + len(user)) / 4) + 700
-    if estimated_tokens > GROQ_ESTIMATED_TPM_BUDGET:
-        logger.warning("Single evaluation request estimate exceeds the local Groq pacing budget")
-        return
-
+def _reserve_groq_token_budget(
+    system: str,
+    user: str,
+    model: str | None = None,
+    max_completion_tokens: int = 900,
+) -> tuple[_TokenReservation, float]:
+    """Reserve estimated tokens in a model-specific sliding minute window."""
+    model_name = model or settings.GROQ_MODEL
+    estimated_tokens = math.ceil((len(system) + len(user)) / 4) + max_completion_tokens
+    budget = int(settings.GROQ_TPM_BUDGET)
+    started_waiting = time.monotonic()
     while True:
-        wait_seconds = 0.0
         with _GROQ_RATE_LIMIT_LOCK:
             now = time.monotonic()
-            while _GROQ_TOKEN_RESERVATIONS and now - _GROQ_TOKEN_RESERVATIONS[0][0] >= 60:
-                _GROQ_TOKEN_RESERVATIONS.popleft()
-            used_tokens = sum(tokens for _, tokens in _GROQ_TOKEN_RESERVATIONS)
-            if used_tokens + estimated_tokens <= GROQ_ESTIMATED_TPM_BUDGET:
-                _GROQ_TOKEN_RESERVATIONS.append((now, estimated_tokens))
-                return
-            wait_seconds = max(0.25, 60 - (now - _GROQ_TOKEN_RESERVATIONS[0][0]) + 0.1)
-        logger.info("Waiting %.1fs for Groq token budget before the next grading pass", wait_seconds)
+            reservations = _GROQ_TOKEN_RESERVATIONS.setdefault(model_name, deque())
+            while reservations and now - reservations[0].created_at >= 60:
+                reservations.popleft()
+            used_tokens = sum(item.tokens for item in reservations)
+            provider = _GROQ_PROVIDER_LIMITS.get(model_name)
+            if provider and now < provider[1] and provider[0] < estimated_tokens:
+                wait_seconds = max(0.05, provider[1] - now)
+            elif used_tokens + estimated_tokens <= budget or (not reservations and estimated_tokens > budget):
+                reservation = _TokenReservation(now, estimated_tokens)
+                reservations.append(reservation)
+                if estimated_tokens > budget:
+                    logger.warning("Groq request estimate (%d) exceeds configured minute budget (%d)", estimated_tokens, budget)
+                return reservation, time.monotonic() - started_waiting
+            else:
+                wait_seconds = max(0.05, 60 - (now - reservations[0].created_at) + 0.05)
+        logger.info("Waiting %.2fs for the %s Groq token budget", wait_seconds, model_name)
         time.sleep(wait_seconds)
 
 
-def _ask_json(model: str, system: str, user: str) -> dict[str, Any]:
+def _reconcile_groq_reservation(reservation: _TokenReservation, actual_tokens: int) -> None:
+    with _GROQ_RATE_LIMIT_LOCK:
+        for reservations in _GROQ_TOKEN_RESERVATIONS.values():
+            for item in reservations:
+                if item is reservation:
+                    item.tokens = max(0, int(actual_tokens))
+                    return
+
+
+def _parse_reset_seconds(value: Any) -> float | None:
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    composite = re.fullmatch(r"(?:(\d+)m)?(\d+(?:\.\d+)?)s", text)
+    if composite:
+        return int(composite.group(1) or 0) * 60 + float(composite.group(2))
+    match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)(ms|s|m)?", text)
+    if not match:
+        return None
+    quantity = float(match.group(1))
+    unit = match.group(2) or "s"
+    return quantity / 1000 if unit == "ms" else quantity * 60 if unit == "m" else quantity
+
+
+def _read_rate_headers(headers: Any, model: str) -> None:
+    if not headers:
+        return
+    remaining = None
+    reset_seconds = None
+    try:
+        raw_remaining = headers.get("x-ratelimit-remaining-tokens")
+        remaining = int(raw_remaining) if raw_remaining is not None else None
+    except (TypeError, ValueError):
+        remaining = None
+    try:
+        reset_seconds = _parse_reset_seconds(headers.get("x-ratelimit-reset-tokens"))
+        if reset_seconds is None:
+            reset_seconds = _parse_reset_seconds(headers.get("retry-after"))
+    except (TypeError, ValueError):
+        reset_seconds = None
+    if reset_seconds is not None:
+        with _GROQ_RATE_LIMIT_LOCK:
+            _GROQ_PROVIDER_LIMITS[model] = (
+                max(0, remaining) if remaining is not None else 0,
+                time.monotonic() + max(0.0, reset_seconds),
+            )
+
+
+def _groq_redis():
+    global _GROQ_REDIS_CLIENT
+    if redis is None:
+        return None
+    if _GROQ_REDIS_CLIENT is None:
+        with _GROQ_REDIS_CLIENT_GUARD:
+            if _GROQ_REDIS_CLIENT is None:
+                _GROQ_REDIS_CLIENT = redis.Redis.from_url(
+                    settings.REDIS_URL, socket_connect_timeout=1, socket_timeout=2
+                )
+    return _GROQ_REDIS_CLIENT
+
+
+def _daily_counter_key(now: datetime | None = None) -> str:
+    return f"vidyaranya:groq:tpd:{(now or datetime.now(timezone.utc)).astimezone(timezone.utc):%Y-%m-%d}"
+
+
+def _read_daily_token_usage() -> int | None:
+    try:
+        client = _groq_redis()
+        if client is None:
+            return None
+        value = client.get(_daily_counter_key())
+        return int(value or 0)
+    except Exception:
+        logger.warning("Could not read Groq daily token counter; allowing evaluation", exc_info=True)
+        return None
+
+
+def _check_daily_token_budget() -> None:
+    used = _read_daily_token_usage()
+    if used is None:
+        return
+    budget = int(settings.GROQ_DAILY_TOKEN_BUDGET)
+    if used > budget * 0.85:
+        now = datetime.now(timezone.utc)
+        midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        raise GroqDailyBudgetDeferred(min(3600, max(1, int((midnight - now).total_seconds()))))
+
+
+def _record_daily_token_usage(actual_tokens: int) -> None:
+    if actual_tokens <= 0:
+        return
+    try:
+        client = _groq_redis()
+        if client is None:
+            return
+        key = _daily_counter_key()
+        total = int(client.incrby(key, int(actual_tokens)))
+        if total <= actual_tokens:
+            client.expire(key, 26 * 60 * 60)
+    except Exception:
+        logger.warning("Could not update Groq daily token counter", exc_info=True)
+
+
+def _ask_json(
+    model: str,
+    system: str,
+    user: str,
+    *,
+    max_completion_tokens: int = 900,
+) -> dict[str, Any]:
     client = _client()
     if client is None:
         return {}
     if len(user) > MAX_GROQ_USER_CHARS:
-        logger.warning(
-            "Truncating evaluation prompt for model %s from %d to %d characters",
-            model,
-            len(user),
-            MAX_GROQ_USER_CHARS,
+        logger.warning("Large evaluation request for model %s (%d chars); student text remains intact", model, len(user))
+    reservation, waited = _reserve_groq_token_budget(system, user, model, max_completion_tokens)
+    try:
+        response = client.chat.completions.with_raw_response.create(
+            model=model,
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+            temperature=0,
+            reasoning_effort="low",
+            max_completion_tokens=max_completion_tokens,
+            response_format={"type": "json_object"},
         )
-        user = user[: MAX_GROQ_USER_CHARS - 32] + "\n[Input truncated for token limits.]"
-    _reserve_groq_token_budget(system, user)
-    completion = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-        temperature=0.1,
-    )
+    except Exception as exc:
+        error_response = getattr(exc, "response", None)
+        _read_rate_headers(getattr(error_response, "headers", None), model)
+        raise
+    _read_rate_headers(response.headers, model)
+    completion = response.parse()
+    usage = getattr(completion, "usage", None)
+    prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+    completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+    total_tokens = int(getattr(usage, "total_tokens", 0) or prompt_tokens + completion_tokens)
+    _reconcile_groq_reservation(reservation, total_tokens)
+    _record_daily_token_usage(total_tokens)
+    stats = getattr(_GROQ_STATS_LOCAL, "value", None)
+    if stats is not None:
+        stats["llm_calls"] += 1
+        stats["prompt_tokens"] += prompt_tokens
+        stats["completion_tokens"] += completion_tokens
+        stats["total_tokens"] += total_tokens
+        stats["seconds_spent_waiting_on_limiter"] += waited
     return _extract_json(completion.choices[0].message.content or "")
 
 
@@ -543,7 +698,7 @@ def grade_node(state: EvaluationState) -> EvaluationState:
             synthesis_user = "\n".join((static_context, "Evidence by criterion from all parts (overlap may repeat):", json.dumps(compact, ensure_ascii=False)))
             if len(synthesis_user) <= MAX_GROQ_USER_CHARS:
                 break
-        synthesis = _ask_json(settings.GROQ_MODEL, _SYNTHESIS_SYSTEM, synthesis_user)
+        synthesis = _ask_json(settings.GROQ_MODEL, _SYNTHESIS_SYSTEM, synthesis_user, max_completion_tokens=700)
         synthesized, final_depth = _map_compact_coverage(synthesis, topics, str(state.get("submission_id", "unknown")), "synthesis")
         synth_by_topic = {_norm_criterion(item["topic"]): item for item in synthesized}
         for item in merged:
@@ -737,6 +892,7 @@ EVALUATION_GRAPH = build_evaluation_graph()
 
 def run_evaluation_graph(initial: EvaluationState) -> EvaluationState:
     """Run the compiled Phase 4 graph and return its final state."""
+    _check_daily_token_budget()
     if EVALUATION_GRAPH is None:
         return _run_sequential(initial)
     return EVALUATION_GRAPH.invoke(initial)

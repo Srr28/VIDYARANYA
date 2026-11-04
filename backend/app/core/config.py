@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     ENABLE_DEV_LOGIN: bool = True
     GROQ_API_KEY: str = ""
     GROQ_MODEL: str = "openai/gpt-oss-20b"
+    GROQ_LIGHT_MODEL: str = ""
+    GROQ_TPM_BUDGET: int = 6500
+    GROQ_DAILY_TOKEN_BUDGET: int = 200000
     GOOGLE_CLIENT_ID: str = ""
     GOOGLE_CLIENT_SECRET: str = ""
     BACKEND_CORS_ORIGINS: list[str] = ["http://localhost", "http://localhost:80"]
@@ -116,6 +119,13 @@ class Settings(BaseSettings):
     def validate_refresh_token_expiry(cls, value: int) -> int:
         if value < 1 or value > 365:
             raise ValueError("REFRESH_TOKEN_EXPIRE_DAYS must be between 1 and 365")
+        return value
+
+    @field_validator("GROQ_TPM_BUDGET", "GROQ_DAILY_TOKEN_BUDGET")
+    @classmethod
+    def validate_groq_token_budgets(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("Groq token budgets must be positive")
         return value
 
     @field_validator("FRONTEND_URL")

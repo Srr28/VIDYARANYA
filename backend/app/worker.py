@@ -28,7 +28,7 @@ from app.models.course import Course
 from app.models.note import Note
 from app.models.submission import Submission
 from app.models.submission_text import SubmissionText
-from app.services.agents.eval_graph import integrity_node, run_evaluation_graph
+from app.services.agents.eval_graph import GroqDailyBudgetDeferred, integrity_node, run_evaluation_graph
 from app.services.grading_service import grade
 from app.services.ocr_service import extract_text_from_bytes
 from app.services.queue_service import get_redis_settings, queue_service
@@ -85,6 +85,14 @@ def _is_rate_limit_error(exc: Exception) -> bool:
 
 def _rate_limit_retry_after_seconds(exc: Exception) -> int | None:
     """Extract Groq's suggested wait (for example, `20m46.7s`) when present."""
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    retry_after = headers.get("retry-after") if headers is not None else None
+    if retry_after:
+        try:
+            return max(1, int(float(retry_after)))
+        except (TypeError, ValueError):
+            pass
     match = re.search(r"try again in\s+(?:(\d+)m)?(\d+(?:\.\d+)?)s", str(exc), re.IGNORECASE)
     if not match:
         return None
@@ -221,7 +229,20 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
                     "plagiarism_matches": evaluation_state.get("plagiarism_matches", []),
                 }
         except Exception as exc:
-            if _is_rate_limit_error(exc):
+            if isinstance(exc, GroqDailyBudgetDeferred):
+                submission.status = "pending_eval"
+                submission.feedback_text = (
+                    "AI evaluation is queued because the daily AI token budget is nearly used up; "
+                    "it will retry automatically."
+                )
+                db.commit()
+                logger.warning(
+                    "Deferring evaluation for submission %s until the daily Groq budget resets (retry in %ds)",
+                    submission_id,
+                    exc.defer_seconds,
+                )
+                raise Retry(defer=exc.defer_seconds)
+            elif _is_rate_limit_error(exc):
                 provider_wait = _rate_limit_retry_after_seconds(exc)
                 retry_delay = max(backoff_delay, provider_wait or 0)
                 logger.warning(
