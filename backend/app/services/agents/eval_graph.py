@@ -259,7 +259,7 @@ def prepare_node(state: EvaluationState) -> EvaluationState:
     except Exception:
         course_material_count = 0
     feedback_step = "rag_feedback" if course_material_count > 0 else "rubric_feedback"
-    plan = ["integrity", "coverage", "mastery", feedback_step]
+    plan = ["integrity", "grade", feedback_step]
 
     logger.info(
         "Evaluation preparation selected plan for submission %s: %s",
@@ -358,215 +358,20 @@ def integrity_node(state: EvaluationState) -> EvaluationState:
     }
 
 
-def coverage_node(state: EvaluationState) -> EvaluationState:
-    rubric = state.get("rubric", [])
-    # Rubric criterion names are the canonical scoring keys. Assignment topic
-    # tags are useful context, but often differ from the criterion wording and
-    # must not be used as dictionary keys for rubric scores.
-    rubric_topics = [
-        " ".join(str(item.get("criterion") or "").split())
-        for item in rubric
-        if isinstance(item, dict) and str(item.get("criterion") or "").strip()
-    ]
-    course_topics = [
-        " ".join(str(topic).split())
-        for topic in (state.get("topics_list") or [])
-        if topic is not None and str(topic).strip()
-    ]
-    topics = list(dict.fromkeys(rubric_topics or course_topics or ["General"]))
-    reference = state.get("reference_solution", "")
-    chunks = _chunk_submission(state.get("raw_text", ""))
-    if not chunks:
-        return {
-            "topic_coverage": [
-                {"topic": topic, "score": 0.0, "evidence": [], "missing": ["No readable submission text was extracted"]}
-                for topic in topics
-            ]
-        }
-    logger.info(
-        "Evaluating submission %s using %d text chunk(s) (%d extracted characters)",
-        state.get("submission_id"),
-        len(chunks),
-        len(state.get("raw_text", "")),
-    )
-
-    # Keep the full chunk in every request. Bound supplementary context first,
-    # so the generic prompt-size guard can never lop off the end of student work.
-    rubric_text = json.dumps(rubric, ensure_ascii=False)[:2000]
-    topics_text = json.dumps(course_topics, ensure_ascii=False)[:600]
-    criteria_text = json.dumps(topics, ensure_ascii=False)[:1000]
-    reference_text = reference[:3000]
-    per_chunk: list[list[dict[str, Any]]] = []
-    system = (
-        "You are a fair academic grader. Apply the rubric and award credit for valid alternative approaches. "
-        "This is one part of a possibly longer submission: score evidence in this part only and do not say "
-        "a criterion is missing merely because it may appear in another part. Return JSON only in the form "
-        '{"topics":[{"topic":"...","score":0,"evidence":[],"missing":[]}]}. '
-        "Return exactly one result for each evaluation criterion, using its exact name. Use the teacher reference "
-        "solution as a guide to recognize correct content, while accepting equivalent valid answers. "
-        "Score each criterion from 0 to 10 based on evidence in this part. For any criterion below 10, "
-        "name the specific required element not evidenced in this part in missing; do not use vague labels."
-    )
-
-    for index, chunk in enumerate(chunks, start=1):
-        user = (
-            f"Evaluation criteria (use these exact names): {criteria_text}\nRubric: {rubric_text}\n"
-            f"Assignment topic context: {topics_text}\n"
-            f"Teacher reference solution (grading guidance): {reference_text}\n"
-            f"Submission part {index} of {len(chunks)}:\n{chunk}"
-        )
-        # Supplementary context is bounded above; 4,500 characters of actual
-        # submission plus labels remain below MAX_GROQ_USER_CHARS.
-        result = _ask_json(settings.GROQ_MODEL, system, user)
-        if not isinstance(result.get("topics"), list) or not result.get("topics"):
-            logger.warning(
-                "Coverage response was empty for submission %s, chunk %d/%d; retrying with strict JSON instructions",
-                state.get("submission_id"), index, len(chunks),
-            )
-            result = _ask_json(
-                settings.GROQ_MODEL,
-                system + " Your previous response was empty or invalid. Return a non-empty topics array with one item per evaluation criterion, even if a criterion receives 0.",
-                user,
-            )
-        result = _clamp_coverage_scores(result, str(state.get("submission_id", "unknown")), f"chunk {index}/{len(chunks)}")
-        try:
-            parsed = TopicCoverageList.model_validate(result)
-            if not parsed.topics:
-                logger.warning(
-                    "Empty coverage result for submission %s, chunk %d/%d; response keys=%s",
-                    state.get("submission_id"),
-                    index,
-                    len(chunks),
-                    sorted(result.keys()),
-                )
-                per_chunk.append([])
-                continue
-            parsed_topics = [item.model_dump() for item in parsed.topics]
-            expected = {_norm_criterion(topic): topic for topic in topics}
-            # Models sometimes echo an assignment tag or the literal "None"
-            # instead of a rubric criterion. Keep results by exact name where
-            # possible, and use response order only when counts align.
-            for topic_index, item in enumerate(parsed_topics):
-                label = str(item.get("topic") or "").strip()
-                canonical = expected.get(_norm_criterion(label))
-                if canonical is None and len(parsed_topics) == len(topics) and topic_index < len(topics):
-                    canonical = topics[topic_index]
-                if canonical is not None:
-                    item["topic"] = canonical
-            per_chunk.append(parsed_topics)
-        except ValidationError as exc:
-            logger.warning(
-                "Could not parse coverage result for submission %s, chunk %d/%d; validation_errors=%s; response_keys=%s",
-                state.get("submission_id"),
-                index,
-                len(chunks),
-                json.dumps(exc.errors(include_input=False), ensure_ascii=False),
-                sorted(result.keys()),
-            )
-            per_chunk.append([])
-
-    # Merge all parts: take the strongest supported score per criterion, collect
-    # evidence from every part. A final synthesis pass reconciles evidence that
-    # spans multiple parts instead of treating a per-part score as the final one.
-    coverage: list[dict[str, Any]] = []
-    synthesis: list[dict[str, Any]] = []
-    for topic in topics:
-        matches = [
-            item
-            for chunk_result in per_chunk
-            for item in chunk_result
-            if _norm_criterion(item.get("topic")) == _norm_criterion(topic)
-        ]
-        if not matches:
-            coverage.append({"topic": topic, "score": 0.0, "evidence": [], "missing": ["No structured coverage result"]})
-            synthesis.append({"topic": topic, "part_scores": [], "evidence": [], "part_missing": []})
-            continue
-        strongest = max(matches, key=lambda item: float(item.get("score", 0) or 0))
-        evidence: list[str] = []
-        for match in matches:
-            for item in match.get("evidence", []):
-                value = str(item).strip()
-                if value and value not in evidence:
-                    evidence.append(value)
-                if len(evidence) >= 8:
-                    break
-            if len(evidence) >= 8:
-                break
-        coverage.append({
-            "topic": topic,
-            "score": float(strongest.get("score", 0) or 0),
-            "evidence": evidence,
-            "missing": strongest.get("missing", []),
-        })
-        missing_observations: list[str] = []
-        for match in matches:
-            for item in match.get("missing", []):
-                value = str(item).strip()
-                if value and value not in missing_observations:
-                    missing_observations.append(value)
-        synthesis.append({
-            "topic": topic,
-            "part_scores": sorted(
-                [round(float(item.get("score", 0) or 0), 2) for item in matches],
-                reverse=True,
-            )[:5],
-            "evidence": evidence,
-            "part_missing": missing_observations[:5],
-        })
-
-    if len(chunks) > 1 or reference_text.strip():
-        final_system = (
-            "You are consolidating evidence from every part of one student's complete submission. "
-            "Use the rubric and reference as guidance, accept valid alternative approaches, and judge each "
-            "criterion across the combined evidence. Part-level missing notes are not final: evidence may "
-            "appear in another part. Ignore repeated evidence caused by overlapping chunks. Return JSON only "
-            'in the form {"topics":[{"topic":"...","score":0,"evidence":[],"missing":[]}]}. '
-            "Give a final 0-to-10 criterion score based on the whole submission. For each criterion below 10, "
-            "list the concrete rubric elements still missing from the complete submission; never leave missing "
-            "empty for a partially met criterion."
-        )
-        final_user = ""
-        for evidence_limit in (5, 3, 1, 0):
-            compact = [
-                {
-                    "topic": item["topic"],
-                    "part_scores": item["part_scores"],
-                    "evidence": [value[:180] for value in item["evidence"][:evidence_limit]],
-                    "part_missing": item["part_missing"][:2],
-                }
-                for item in synthesis
-            ]
-            final_user = (
-                f"Evaluation criteria (use these exact names): {criteria_text}\nRubric: {rubric_text}\n"
-                f"Assignment topic context: {topics_text}\n"
-                f"Teacher reference solution (grading guidance): {reference_text[:1800]}\n"
-                f"Evidence gathered from all submission parts: {json.dumps(compact, ensure_ascii=False)}"
-            )
-            if len(final_user) <= MAX_GROQ_USER_CHARS:
-                break
-        if len(final_user) <= MAX_GROQ_USER_CHARS:
-            final_result = _ask_json(settings.GROQ_MODEL, final_system, final_user)
-            final_result = _clamp_coverage_scores(final_result, str(state.get("submission_id", "unknown")), "final synthesis")
-            try:
-                final_coverage = TopicCoverageList.model_validate(final_result).topics
-                final_by_topic = {_norm_criterion(item.topic): item for item in final_coverage}
-                for topic_index, item in enumerate(coverage):
-                    final_item = final_by_topic.get(_norm_criterion(item["topic"]))
-                    if final_item is None and len(final_coverage) == len(coverage) and topic_index < len(final_coverage):
-                        final_item = final_coverage[topic_index]
-                    if final_item is not None:
-                        final_evidence = [value.strip() for value in final_item.evidence if value.strip()]
-                        # A synthesis response that drops evidence must not
-                        # erase a positive, evidence-backed chunk score.
-                        if final_evidence or not item.get("evidence"):
-                            item["score"] = final_item.score
-                            item["missing"] = [
-                                value for value in final_item.missing
-                                if value.strip().casefold() not in {"none", "n/a", "not applicable"}
-                            ]
-            except ValidationError:
-                logger.warning("Could not parse final coverage synthesis for submission %s", state.get("submission_id"))
-    return {"topic_coverage": coverage}
+_GRADE_SYSTEM = (
+    "Grade academic work fairly against the supplied rubric. Accept valid alternative approaches. "
+    "Return JSON only: {\"c\":[{\"t\":\"criterion\",\"s\":0,\"e\":[],\"m\":[]}],"
+    "\"b\":{\"s\":1,\"l\":\"surface\"}}. Include every criterion exactly once. Scores are 0-10. "
+    "Give at most 2 evidence strings and 2 concrete missing rubric elements per criterion, each at most 120 chars. "
+    "Do not use vague missing notes. Bloom labels: surface, understanding, applied, analytical, evaluative."
+)
+_SYNTHESIS_SYSTEM = (
+    "Consolidate compact evidence from every part of one submission. Ignore overlap. Return JSON only using "
+    "the same c and b schema as grading, and an optional f string containing concise Markdown feedback. "
+    "Score each criterion 0-10 across the whole submission, include at most 2 evidence and 2 concrete missing "
+    "items per criterion (each <=120 chars), and do not infer evidence that is absent. If any criterion is partial, "
+    "write a short feedback draft in f; otherwise omit f."
+)
 
 
 def _mastery_level(score: float, maximum: float) -> str:
@@ -580,14 +385,95 @@ def _mastery_level(score: float, maximum: float) -> str:
     return "Advanced"
 
 
-def mastery_node(state: EvaluationState) -> EvaluationState:
-    coverage = state.get("topic_coverage", [])
+def _rubric_topics(state: EvaluationState) -> list[str]:
+    rubric_topics = [
+        " ".join(str(item.get("criterion") or "").split())
+        for item in state.get("rubric", [])
+        if isinstance(item, dict) and str(item.get("criterion") or "").strip()
+    ]
+    course_topics = [
+        " ".join(str(topic).split())
+        for topic in (state.get("topics_list") or [])
+        if topic is not None and str(topic).strip()
+    ]
+    return list(dict.fromkeys(rubric_topics or course_topics or ["General"]))
+
+
+def _compact_rubric(state: EvaluationState, topics: list[str]) -> str:
+    if state.get("compact_rubric"):
+        return str(state["compact_rubric"])
+    rubric = state.get("rubric", [])
+    lines = []
+    for index, item in enumerate(rubric, 1):
+        if not isinstance(item, dict):
+            continue
+        criterion = " ".join(str(item.get("criterion") or "").split())
+        if not criterion:
+            continue
+        description = " ".join(str(item.get("description") or "").split())[:160]
+        points = item.get("max_points", item.get("max_score", 0))
+        lines.append(f"{index}. {criterion} ({points} pts): {description}".rstrip())
+    return "\n".join(lines) or "; ".join(topics)
+
+
+def _map_compact_coverage(
+    result: dict[str, Any], topics: list[str], submission_id: str, stage: str
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    raw_criteria = result.get("c")
+    # Accept the previous long-form key while old checkpoint entries expire.
+    if not isinstance(raw_criteria, list):
+        raw_criteria = result.get("topics")
+    by_name = {_norm_criterion(topic): topic for topic in topics}
+    coverage: list[dict[str, Any]] = []
+    for index, raw in enumerate(raw_criteria if isinstance(raw_criteria, list) else []):
+        if not isinstance(raw, dict):
+            continue
+        label = raw.get("t", raw.get("topic", ""))
+        canonical = by_name.get(_norm_criterion(label))
+        if canonical is None and len(raw_criteria) == len(topics) and index < len(topics):
+            canonical = topics[index]
+        if canonical is None:
+            continue
+        try:
+            score = float(raw.get("s", raw.get("score", 0)) or 0)
+        except (ValueError, TypeError):
+            score = 0.0
+        score = max(0.0, min(10.0, score)) if math.isfinite(score) else 0.0
+        evidence = raw.get("e", raw.get("evidence", []))
+        missing = raw.get("m", raw.get("missing", []))
+        evidence = evidence if isinstance(evidence, list) else []
+        missing = missing if isinstance(missing, list) else []
+        coverage.append({
+            "topic": canonical,
+            "score": score,
+            "evidence": [str(value).strip()[:120] for value in evidence[:2] if str(value).strip()],
+            "missing": [str(value).strip()[:120] for value in missing[:2] if str(value).strip()],
+        })
+    mapped = { _norm_criterion(item["topic"]): item for item in coverage }
+    complete = [mapped.get(_norm_criterion(topic), {
+        "topic": topic, "score": 0.0, "evidence": [], "missing": ["No structured evaluation result"]
+    }) for topic in topics]
+    complete = _clamp_coverage_scores({"topics": complete}, submission_id, stage)["topics"]
+    bloom = result.get("b") if isinstance(result.get("b"), dict) else {}
+    # Old long-form depth keys are accepted only for cached/compat data.
+    bloom_score = bloom.get("s", bloom.get("score", 1))
+    bloom_label = bloom.get("l", bloom.get("label", "surface"))
+    try:
+        depth = BloomDepth(score=float(bloom_score), label=str(bloom_label)).model_dump()
+    except (ValidationError, TypeError, ValueError):
+        depth = {"score": 1.0, "label": "surface"}
+    feedback_draft = str(result.get("f") or "").strip()
+    return complete, {**depth, "feedback_draft": feedback_draft}
+
+
+def _build_mastery(state: EvaluationState, coverage: list[dict[str, Any]], depth: dict[str, Any]) -> dict[str, Any]:
     rubric = state.get("rubric", [])
     maximum = float(state.get("max_score") or sum(float(item.get("max_points", 0)) for item in rubric) or 100)
     by_topic = {_norm_criterion(item.get("topic")): item for item in coverage}
     topic_scores: list[dict[str, Any]] = []
     total = 0.0
-    for item in rubric or [{"criterion": item.get("topic", "General"), "max_points": maximum} for item in coverage]:
+    score_items = rubric or [{"criterion": item.get("topic", "General"), "max_points": maximum} for item in coverage]
+    for item in score_items:
         topic = str(item.get("criterion") or item.get("topic") or "General")
         max_points = float(item.get("max_points", item.get("max_score", 0)) or 0)
         match = by_topic.get(_norm_criterion(topic), {})
@@ -595,46 +481,81 @@ def mastery_node(state: EvaluationState) -> EvaluationState:
         awarded = max_points * max(0.0, min(10.0, coverage_score)) / 10.0
         total += awarded
         topic_scores.append({
-            "topic": topic,
-            "score": round(awarded, 2),
-            "max_points": max_points,
-            "coverage_score": coverage_score,
-            "evidence": match.get("evidence", []),
-            "missing": match.get("missing", []),
+            "topic": topic, "score": round(awarded, 2), "max_points": max_points,
+            "coverage_score": coverage_score, "evidence": match.get("evidence", []), "missing": match.get("missing", []),
         })
-
-    depth_result = _ask_json(
-        settings.GROQ_MODEL,
-        "Rate the Bloom conceptual depth of this submission. Return JSON only: "
-        '{"score":1-5,"label":"surface|understanding|applied|analytical|evaluative"}.',
-        json.dumps(
-            [
-                {
-                    "topic": item.get("topic"),
-                    "score": item.get("score"),
-                    "evidence": item.get("evidence", []),
-                    "missing": item.get("missing", []),
-                }
-                for item in coverage
-            ],
-            ensure_ascii=False,
-        ),
-    )
-    try:
-        depth = BloomDepth.model_validate(depth_result).model_dump()
-    except ValidationError:
-        depth = {"score": 1.0, "label": "surface"}
-
     return {
-        "mastery_result": {
-            "total_score": round(total, 2),
-            "max_score": maximum,
-            "mastery_level": _mastery_level(total, maximum),
-            "topic_scores": topic_scores,
-            "depth_score": depth["score"],
-            "depth_label": depth["label"],
-        }
+        "total_score": round(total, 2), "max_score": maximum,
+        "mastery_level": _mastery_level(total, maximum), "topic_scores": topic_scores,
+        "depth_score": depth.get("score", 1.0), "depth_label": depth.get("label", "surface"),
     }
+
+
+def grade_node(state: EvaluationState) -> EvaluationState:
+    """Score each text chunk once, synthesize only multi-chunk work, then map to the stable result shape."""
+    topics = _rubric_topics(state)
+    chunks = list(state.get("submission_chunks") or _chunk_submission(state.get("raw_text", "")))
+    if not chunks:
+        coverage = [{"topic": topic, "score": 0.0, "evidence": [], "missing": ["No readable submission text was extracted"]} for topic in topics]
+        return {"topic_coverage": coverage, "mastery_result": _build_mastery(state, coverage, {"score": 1.0, "label": "surface"})}
+
+    rubric_text = _compact_rubric(state, topics)[:1800]
+    topics_text = json.dumps(state.get("topics_list", []), ensure_ascii=False)[:400]
+    reference = str(state.get("reference_digest") or state.get("reference_solution") or "")[:900]
+    static_context = (
+        f"Rubric:\n{rubric_text}\nTopics: {topics_text}\nReference guidance:\n{reference}\n"
+        f"Criteria (exact names): {json.dumps(topics, ensure_ascii=False)}"
+    )
+    per_chunk: list[list[dict[str, Any]]] = []
+    depths: list[dict[str, Any]] = []
+    for index, chunk in enumerate(chunks, start=1):
+        user = f"{static_context}\nSubmission part {index}/{len(chunks)} (score evidence in this part only):\n{chunk}"
+        result = _ask_json(settings.GROQ_MODEL, _GRADE_SYSTEM, user)
+        coverage, depth = _map_compact_coverage(result, topics, str(state.get("submission_id", "unknown")), f"chunk {index}")
+        if not result.get("c") and not result.get("topics"):
+            logger.warning("Invalid grading JSON for submission %s chunk %d; retrying once strictly", state.get("submission_id"), index)
+            strict = _ask_json(settings.GROQ_MODEL, _GRADE_SYSTEM + " Your prior JSON was invalid. Return a non-empty c array and b object exactly as specified.", user)
+            if strict.get("c") or strict.get("topics"):
+                result = strict
+                coverage, depth = _map_compact_coverage(result, topics, str(state.get("submission_id", "unknown")), f"chunk {index} retry")
+            else:
+                coverage = [{"topic": topic, "score": 0.0, "evidence": [], "missing": ["Evaluation response could not be parsed"]} for topic in topics]
+                depth = {"score": 1.0, "label": "surface", "feedback_draft": ""}
+        per_chunk.append(coverage)
+        depths.append(depth)
+
+    merged: list[dict[str, Any]] = []
+    synthesis_input: list[dict[str, Any]] = []
+    for topic in topics:
+        matches = [item for chunk_result in per_chunk for item in chunk_result if _norm_criterion(item["topic"]) == _norm_criterion(topic)]
+        strongest = max(matches, key=lambda item: float(item.get("score", 0) or 0), default={})
+        evidence = list(dict.fromkeys(value for item in matches for value in item.get("evidence", [])))[:2]
+        missing = list(dict.fromkeys(value for item in matches for value in item.get("missing", [])))[:2]
+        merged.append({"topic": topic, "score": float(strongest.get("score", 0) or 0), "evidence": evidence, "missing": missing})
+        synthesis_input.append({"t": topic, "s": [item.get("score", 0) for item in matches], "e": evidence, "m": missing})
+
+    final_depth = depths[0] if depths else {"score": 1.0, "label": "surface"}
+    feedback_draft = ""
+    if len(chunks) > 1:
+        synthesis_user = "\n".join((static_context, "Evidence by criterion from all parts (overlap may repeat):", json.dumps(synthesis_input, ensure_ascii=False)))
+        for evidence_limit in (2, 1, 0):
+            compact = [{"t": item["t"], "s": item["s"], "e": item["e"][:evidence_limit], "m": item["m"][:2]} for item in synthesis_input]
+            synthesis_user = "\n".join((static_context, "Evidence by criterion from all parts (overlap may repeat):", json.dumps(compact, ensure_ascii=False)))
+            if len(synthesis_user) <= MAX_GROQ_USER_CHARS:
+                break
+        synthesis = _ask_json(settings.GROQ_MODEL, _SYNTHESIS_SYSTEM, synthesis_user)
+        synthesized, final_depth = _map_compact_coverage(synthesis, topics, str(state.get("submission_id", "unknown")), "synthesis")
+        synth_by_topic = {_norm_criterion(item["topic"]): item for item in synthesized}
+        for item in merged:
+            final = synth_by_topic.get(_norm_criterion(item["topic"]))
+            if final:
+                # Preserve positive chunk evidence if synthesis returned none.
+                if final.get("evidence") or not item.get("evidence"):
+                    item.update(final)
+        feedback_draft = str(synthesis.get("f") or "").strip()
+
+    mastery = _build_mastery(state, merged, final_depth)
+    return {"topic_coverage": merged, "mastery_result": mastery, "feedback_draft": feedback_draft}
 
 
 def _feedback_node(
@@ -737,8 +658,7 @@ def finalize_node(state: EvaluationState) -> EvaluationState:
 
 _EVALUATION_STEPS: dict[str, Callable[[EvaluationState], EvaluationState]] = {
     "integrity": integrity_node,
-    "coverage": coverage_node,
-    "mastery": mastery_node,
+    "grade": grade_node,
     "rag_feedback": rag_feedback_node,
     "rubric_feedback": rubric_feedback_node,
 }

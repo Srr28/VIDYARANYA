@@ -10,6 +10,9 @@ class EvaluationState(TypedDict, total=False):
     raw_text: str
     rubric: list[dict[str, Any]]
     reference_solution: str
+    reference_digest: str
+    compact_rubric: str
+    submission_chunks: list[str]
     topics_list: list[str]
     max_score: float
     integrity_score: float
@@ -19,6 +22,9 @@ class EvaluationState(TypedDict, total=False):
     mastery_result: dict[str, Any]
     retrieved_chunks: dict[str, list[dict[str, Any]]]
     feedback_markdown: str
+    feedback_draft: str
+    feedback_mode: str
+    llm_stats: dict[str, Any]
     execution_plan: list[str]
     execution_step: int
     final_status: str
