@@ -247,6 +247,10 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
                     submission_id,
                     exc.defer_seconds,
                 )
+                if ctx.get("is_fallback"):
+                    await asyncio.sleep(exc.defer_seconds)
+                    ctx["job_try"] = attempt + 1
+                    return await evaluate_submission_task(ctx, submission_id)
                 raise Retry(defer=exc.defer_seconds)
             elif _is_rate_limit_error(exc):
                 provider_wait = _rate_limit_retry_after_seconds(exc)
