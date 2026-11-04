@@ -177,6 +177,7 @@ Note:
 
 - On the Render backend, set `QUEUE_MODE=in_process`; assignment grading, note indexing, and analytics run inside the web service because Render Free does not provide a separate background worker.
 - Set `GROQ_API_KEY` to an active key and keep `GROQ_MODEL=openai/gpt-oss-20b`. Evaluation makes one model request per submission and backs off on provider rate limits.
+- `GROQ_MAX_CALLS_PER_MINUTE` defaults to `20` and paces the evaluator, tutor, and analytics calls through one shared process-local window. Set it lower in Render if other applications or keys in the same Groq organization use quota too.
 - On Vercel, set `VITE_API_URL` to the Render backend URL, such as `https://vidyaranya.onrender.com`.
 - On Render, set `FRONTEND_URL` and `BACKEND_CORS_ORIGINS` to the deployed Vercel origin. For example, use `https://your-app.vercel.app` and `["https://your-app.vercel.app"]`.
 - In-process jobs are recovered from the database when the web service starts again. A free instance can still pause or restart, so evaluations may wait for the next service start and should be retried if the provider quota is exhausted.

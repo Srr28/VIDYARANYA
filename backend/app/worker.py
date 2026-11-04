@@ -31,6 +31,7 @@ from app.models.submission import Submission
 from app.models.submission_text import SubmissionText
 from app.services.agents.eval_graph import integrity_node
 from app.services.grading_service import grade
+from app.services.groq_limiter import set_groq_cooldown
 from app.services.ocr_service import extract_text_from_bytes
 from app.services.queue_service import get_redis_settings, queue_service
 from app.services.rag_service import CHROMA_CLIENT, _encode_texts, index_note, retrieve_grading_context
@@ -370,6 +371,7 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
                     backoff_delay,
                     provider_wait or settings.WORKER_RATE_LIMIT_DEFAULT_RETRY_SECONDS,
                 )
+                set_groq_cooldown(retry_delay)
                 logger.warning(
                     "Groq rate limit for submission %s on attempt %d/%d. Waiting %ds%s.",
                     submission_id,

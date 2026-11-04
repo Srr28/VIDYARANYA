@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field, ValidationError
 from app.core.config import settings
 from app.services.agents.state import EvaluationState
 from app.services.rag_service import CHROMA_CLIENT, MODEL, _encode_texts
+from app.services.groq_limiter import pace_groq_call
 
 logger = logging.getLogger("vidyaranya.evaluation")
 MAX_GROQ_USER_CHARS = 12000
@@ -178,6 +179,7 @@ def _ask_json(model: str, system: str, user: str) -> dict[str, Any]:
         )
         user = user[: MAX_GROQ_USER_CHARS - 32] + "\n[Input truncated for token limits.]"
     _reserve_groq_token_budget(system, user)
+    pace_groq_call()
     completion = client.chat.completions.create(
         model=model,
         messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],

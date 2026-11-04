@@ -7,6 +7,7 @@ import logging
 from typing import Any
 
 from app.core.config import settings
+from app.services.groq_limiter import cool_down_after_groq_error, pace_groq_call
 
 logger = logging.getLogger("vidyaranya.analytics_agent")
 
@@ -56,6 +57,7 @@ def generate_class_recommendations(metrics: dict[str, Any]) -> str:
             "assignment_count": metrics.get("assignment_count", 0),
             "overall_rubric_pct": metrics.get("overall_rubric_pct"),
         }
+        pace_groq_call()
         response = Groq(api_key=settings.GROQ_API_KEY).chat.completions.create(
             model=settings.GROQ_MODEL,
             messages=[
@@ -76,5 +78,6 @@ def generate_class_recommendations(metrics: dict[str, Any]) -> str:
         narrative = (response.choices[0].message.content or "").strip()
         return narrative or fallback
     except Exception as exc:  # Analytics still works when Groq is unavailable.
+        cool_down_after_groq_error(exc)
         logger.warning("Class analytics narrative generation failed; using metric-based guidance: %s", exc)
         return fallback

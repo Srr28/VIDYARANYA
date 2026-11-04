@@ -1,17 +1,13 @@
 import json
 import logging
 import re
-import threading
-import time
 
 from groq import Groq
 
 from app.core.config import settings
+from app.services.groq_limiter import pace_groq_call
 
 logger = logging.getLogger("vidyaranya.grading")
-_GROQ_CALL_LOCK = threading.Lock()
-_LAST_GROQ_CALL_AT = 0.0
-_GROQ_MIN_CALL_INTERVAL_SECONDS = 3.2
 
 try:
     GROQ_CLIENT = Groq(api_key=settings.GROQ_API_KEY) if settings.GROQ_API_KEY else None
@@ -28,16 +24,6 @@ def _extract_json_block(text: str) -> str:
 
 def _format_cell(value: object) -> str:
     return " ".join(str(value or "").replace("|", "/").split())
-
-
-def _pace_groq_call() -> None:
-    """Throttle this process below common free-tier request-per-minute ceilings."""
-    global _LAST_GROQ_CALL_AT
-    with _GROQ_CALL_LOCK:
-        wait_for = _GROQ_MIN_CALL_INTERVAL_SECONDS - (time.monotonic() - _LAST_GROQ_CALL_AT)
-        if wait_for > 0:
-            time.sleep(wait_for)
-        _LAST_GROQ_CALL_AT = time.monotonic()
 
 
 def _build_feedback_markdown(
@@ -168,7 +154,7 @@ def grade(
         len(criteria),
         len(course_context),
     )
-    _pace_groq_call()
+    pace_groq_call()
     completion = GROQ_CLIENT.chat.completions.create(
         model=settings.GROQ_MODEL,
         messages=[

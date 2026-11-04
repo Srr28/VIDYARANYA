@@ -7,6 +7,7 @@ import logging
 from typing import Any
 
 from app.core.config import settings
+from app.services.groq_limiter import cool_down_after_groq_error, pace_groq_call
 
 logger = logging.getLogger("vidyaranya.progress_agent")
 
@@ -80,6 +81,7 @@ def generate_progress_narrative(metrics: dict[str, Any]) -> dict[str, Any]:
                 for item in fallback_trajectory(metrics.get("trajectory") or [])[-12:]
             ],
         }
+        pace_groq_call()
         response = Groq(api_key=settings.GROQ_API_KEY).chat.completions.create(
             model=settings.GROQ_MODEL,
             messages=[
@@ -109,6 +111,7 @@ def generate_progress_narrative(metrics: dict[str, Any]) -> dict[str, Any]:
             "trend": fallback["trend"],
         }
     except Exception as exc:
+        cool_down_after_groq_error(exc)
         logger.warning("Student progress narrative generation failed; using metric-based guidance: %s", exc)
         return fallback
 

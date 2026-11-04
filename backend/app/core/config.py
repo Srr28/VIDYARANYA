@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     WORKER_MAX_RETRIES: int = 5
     WORKER_RETRY_DELAY: int = 2
     WORKER_RATE_LIMIT_DEFAULT_RETRY_SECONDS: int = 60
+    GROQ_MAX_CALLS_PER_MINUTE: int = 20
     QUEUE_MODE: str = "in_process"
 
     @property

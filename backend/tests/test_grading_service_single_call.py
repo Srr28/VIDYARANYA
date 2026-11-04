@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.services import grading_service
+from app.services import grading_service, groq_limiter
 
 
 class FakeCompletions:
@@ -91,3 +91,47 @@ def test_grade_rejects_incomplete_rubric_results(monkeypatch):
 
     with pytest.raises(ValueError, match="rubric results"):
         grading_service.grade("Some answer", [{"criterion": "Correctness", "max_points": 10}])
+
+
+def test_pacer_enforces_configured_calls_per_minute(monkeypatch):
+    now = [100.0]
+    waits = []
+    monkeypatch.setattr(groq_limiter.settings, "GROQ_MAX_CALLS_PER_MINUTE", 2)
+    monkeypatch.setattr(groq_limiter.time, "monotonic", lambda: now[0])
+
+    def fake_sleep(seconds):
+        waits.append(seconds)
+        now[0] += seconds
+
+    monkeypatch.setattr(groq_limiter.time, "sleep", fake_sleep)
+    with groq_limiter._LOCK:
+        groq_limiter._CALL_TIMES.clear()
+        groq_limiter._LAST_CALL_AT = 0.0
+        groq_limiter._COOLDOWN_UNTIL = 0.0
+
+    for _ in range(3):
+        groq_limiter.pace_groq_call()
+
+    assert len(waits) == 2
+    assert all(wait == pytest.approx(30.0) for wait in waits)
+
+
+def test_pacer_honors_shared_provider_cooldown(monkeypatch):
+    now = [200.0]
+    waits = []
+    monkeypatch.setattr(groq_limiter.time, "monotonic", lambda: now[0])
+
+    def fake_sleep(seconds):
+        waits.append(seconds)
+        now[0] += seconds
+
+    monkeypatch.setattr(groq_limiter.time, "sleep", fake_sleep)
+    with groq_limiter._LOCK:
+        groq_limiter._CALL_TIMES.clear()
+        groq_limiter._LAST_CALL_AT = 0.0
+        groq_limiter._COOLDOWN_UNTIL = 0.0
+
+    groq_limiter.set_groq_cooldown(12)
+    groq_limiter.pace_groq_call()
+
+    assert waits == [12.0]

@@ -13,6 +13,11 @@ except Exception:
     SentenceTransformer = None
 
 from app.core.config import settings
+from app.services.groq_limiter import (
+    cool_down_after_groq_error,
+    cool_down_after_groq_response,
+    pace_groq_call,
+)
 
 logger = logging.getLogger("vidyaranya.rag")
 
@@ -61,6 +66,7 @@ def _call_groq_chat(messages: list[dict[str, str]]) -> str | None:
         return None
 
     try:
+        pace_groq_call()
         response = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
             headers={
@@ -74,6 +80,7 @@ def _call_groq_chat(messages: list[dict[str, str]]) -> str | None:
             },
             timeout=45,
         )
+        cool_down_after_groq_response(response)
         if response.status_code >= 400:
             return None
         payload = response.json()
@@ -445,6 +452,7 @@ def stream_chat(
     api_key = (settings.GROQ_API_KEY or "").strip()
     if api_key:
         try:
+            pace_groq_call()
             with requests.post(
                 "https://api.groq.com/openai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
@@ -454,6 +462,7 @@ def stream_chat(
                 ], "temperature": 0.2, "stream": True},
                 timeout=(10, 90), stream=True,
             ) as response:
+                cool_down_after_groq_response(response)
                 response.raise_for_status()
                 for line in response.iter_lines(decode_unicode=True):
                     if not line or not line.startswith("data:"):
@@ -468,7 +477,8 @@ def stream_chat(
                         continue
                     if content:
                         yield {"type": "token", "content": content}
-        except Exception:
+        except Exception as exc:
+            cool_down_after_groq_error(exc)
             yield {"type": "token", "content": "The AI tutor could not complete this response. Please try again."}
     else:
         fallback = chat(course_id, question, selected_note_ids, material_texts)
