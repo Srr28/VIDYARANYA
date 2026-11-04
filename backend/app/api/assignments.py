@@ -191,8 +191,14 @@ async def reevaluate_assignment_submissions(
     submissions = db.query(Submission).filter(Submission.assignment_id == assignment_id).all()
     for submission in submissions:
         submission.status = "pending_eval"
+        submission.ai_score = None
+        submission.mastery_level = None
         submission.depth_score = None
         submission.depth_label = None
+        submission.topic_scores = None
+        submission.feedback_text = None
+        submission.integrity_score = None
+        submission.plagiarism_flag = False
     db.commit()
 
     queued = 0

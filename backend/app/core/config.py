@@ -37,7 +37,8 @@ class Settings(BaseSettings):
     REDIS_MAX_CONNECTIONS: int = 10
     WORKER_MAX_RETRIES: int = 5
     WORKER_RETRY_DELAY: int = 2
-    QUEUE_MODE: str = "auto"
+    WORKER_RATE_LIMIT_DEFAULT_RETRY_SECONDS: int = 60
+    QUEUE_MODE: str = "in_process"
 
     @property
     def r2_endpoint_url(self) -> str | None:

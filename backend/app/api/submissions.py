@@ -892,6 +892,11 @@ def get_ai_evaluation_status(
                 "plagiarism_flag": submission.plagiarism_flag,
             }
         )
+    elif submission.status == "pending":
+        # This is a retry/manual-review state, not a completed grade. Expose
+        # only the worker's actionable status message so the student knows why
+        # evaluation stopped without revealing unreleased grading data.
+        result["feedback_text"] = submission.feedback_text
     elif submission.status == "flagged":
         result["plagiarism_flag"] = submission.plagiarism_flag
         result["integrity_score"] = submission.integrity_score

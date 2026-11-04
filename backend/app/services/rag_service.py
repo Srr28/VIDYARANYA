@@ -1,5 +1,6 @@
 from pathlib import Path
 import hashlib
+import logging
 import re
 from uuid import uuid4
 
@@ -12,6 +13,8 @@ except Exception:
     SentenceTransformer = None
 
 from app.core.config import settings
+
+logger = logging.getLogger("vidyaranya.rag")
 
 class FallbackEmbedder:
     dim = 64
@@ -125,6 +128,60 @@ def index_note(course_id: int | str, text: str, note_id: int | str | None = None
         embeddings=embeddings,
         metadatas=metadata,
     )
+
+
+def retrieve_grading_context(
+    course_id: int | str,
+    topics: list[str],
+    note_id: int | str | None = None,
+    max_chars: int = 3600,
+) -> list[dict[str, str]]:
+    """Retrieve a small, source-labelled set of indexed course-note chunks for grading."""
+    try:
+        collection = CHROMA_CLIENT.get_collection(name=f"course_{course_id}")
+    except Exception:
+        return []
+
+    queries = list(dict.fromkeys(" ".join(str(topic).split()) for topic in topics if str(topic).strip()))
+    if not queries:
+        return []
+
+    try:
+        query_embeddings = _encode_texts(queries)
+        query_options: dict = {
+            "query_embeddings": query_embeddings,
+            "n_results": 2,
+            "include": ["documents", "metadatas"],
+        }
+        if note_id:
+            query_options["where"] = {"note_id": str(note_id)}
+        result = collection.query(**query_options)
+    except Exception:
+        logger.warning("Could not retrieve course context for grading in course %s", course_id, exc_info=True)
+        return []
+
+    documents = result.get("documents") or []
+    metadatas = result.get("metadatas") or []
+    contexts: list[dict[str, str]] = []
+    seen: set[str] = set()
+    used_chars = 0
+    for query_index, topic in enumerate(queries):
+        topic_documents = documents[query_index] if query_index < len(documents) else []
+        topic_metadatas = metadatas[query_index] if query_index < len(metadatas) else []
+        for index, document in enumerate(topic_documents or []):
+            text = " ".join(str(document or "").split())
+            if not text or text in seen or used_chars >= max_chars:
+                continue
+            remaining = max_chars - used_chars
+            text = text[:min(900, remaining)]
+            if not text:
+                continue
+            metadata = topic_metadatas[index] if index < len(topic_metadatas) else {}
+            source = str((metadata or {}).get("source") or "course note")
+            contexts.append({"topic": topic, "source": source, "text": text})
+            seen.add(str(document))
+            used_chars += len(text)
+    return contexts
 
 
 def delete_note_chunks(course_id: int | str, note_id: int | str) -> None:

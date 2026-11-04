@@ -14,6 +14,7 @@ Tests:
 
 import asyncio
 import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 import uuid
 
@@ -40,6 +41,7 @@ from app.services.queue_service import (
 from app.worker import (
     _compute_mastery_level,
     _is_rate_limit_error,
+    _rate_limit_retry_after_seconds,
     evaluate_submission_task,
     generate_class_analytics_task,
     index_note_task,
@@ -155,6 +157,31 @@ def test_parse_redis_url_upstash_ssl():
     assert parsed["ssl"] is not None
 
 
+def test_rate_limit_retry_uses_provider_retry_after_header():
+    error = SimpleNamespace(response=SimpleNamespace(headers={"retry-after": "17"}))
+    assert _rate_limit_retry_after_seconds(error) == 18
+
+
+def test_in_process_fallback_serializes_same_task_type():
+    async def _run():
+        service = QueueService()
+        active = 0
+        max_active = 0
+
+        async def handler(ctx):
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+            await asyncio.sleep(0.01)
+            active -= 1
+
+        contexts = [{"job_id": f"evaluate_submission_task_{index}"} for index in range(4)]
+        await asyncio.gather(*(service._run_fallback(handler, ctx) for ctx in contexts))
+        assert max_active == 1
+
+    asyncio.run(_run())
+
+
 # ---------------------------------------------------------------------------
 # 2. Mastery Level and Rate Limit Helper Tests
 # ---------------------------------------------------------------------------
@@ -261,7 +288,8 @@ def test_evaluate_submission_task_rate_limit_retry(mock_db_scope, sample_data):
             }
 
         with patch("app.worker.grade", side_effect=mock_grade_flaky), \
-             patch("app.worker.settings.WORKER_RETRY_DELAY", 0.01):
+             patch("app.worker.settings.WORKER_RETRY_DELAY", 0.01), \
+             patch("app.worker.settings.WORKER_RATE_LIMIT_DEFAULT_RETRY_SECONDS", 0.01):
             ctx = {"job_try": 1, "is_fallback": True}
             result = await evaluate_submission_task(ctx, str(submission.id))
 

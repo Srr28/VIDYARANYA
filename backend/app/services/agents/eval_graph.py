@@ -55,38 +55,52 @@ except ImportError:  # pragma: no cover
 
 @contextmanager
 def _assignment_integrity_lock(assignment_id: str):
-    """Serialize each assignment's Chroma lookup-and-upsert across worker processes."""
+    """Use Redis across processes when configured, otherwise serialize locally."""
     global _REDIS_LOCK_CLIENT
-    if redis is None:
-        raise RuntimeError("redis-py is required for cross-process plagiarism locking")
-
     with _INTEGRITY_INDEX_LOCK:
-        if _REDIS_LOCK_CLIENT is None:
-            with _REDIS_LOCK_CLIENT_GUARD:
-                if _REDIS_LOCK_CLIENT is None:
-                    _REDIS_LOCK_CLIENT = redis.Redis.from_url(
-                        settings.REDIS_URL,
-                        socket_connect_timeout=5,
-                        socket_timeout=10,
-                    )
+        if redis is None or settings.QUEUE_MODE == "in_process":
+            yield
+            return
 
-        lock = _REDIS_LOCK_CLIENT.lock(
-            f"vidyaranya:plagiarism:{assignment_id}",
-            timeout=300,
-            blocking_timeout=300,
-            sleep=0.2,
-            thread_local=False,
-        )
-        if not lock.acquire(blocking=True):
-            raise TimeoutError(
-                f"Timed out waiting for plagiarism lock for assignment {assignment_id}"
+        lock = None
+        acquired = False
+        redis_unavailable = False
+        try:
+            if _REDIS_LOCK_CLIENT is None:
+                with _REDIS_LOCK_CLIENT_GUARD:
+                    if _REDIS_LOCK_CLIENT is None:
+                        _REDIS_LOCK_CLIENT = redis.Redis.from_url(
+                            settings.REDIS_URL,
+                            socket_connect_timeout=3,
+                            socket_timeout=5,
+                        )
+            lock = _REDIS_LOCK_CLIENT.lock(
+                f"vidyaranya:plagiarism:{assignment_id}",
+                timeout=300,
+                blocking_timeout=10,
+                sleep=0.2,
+                thread_local=False,
             )
+            acquired = bool(lock.acquire(blocking=True))
+        except Exception as exc:
+            redis_unavailable = True
+            logger.warning(
+                "Redis integrity lock unavailable (%s); using this process's lock for assignment %s",
+                exc.__class__.__name__,
+                assignment_id,
+            )
+        if lock is not None and not acquired and not redis_unavailable:
+            # A reachable Redis lock held by another process must not be bypassed.
+            raise TimeoutError(f"Timed out waiting for plagiarism lock for assignment {assignment_id}")
         try:
             yield
         finally:
-            # Redis verifies the token, so this cannot release a lock acquired by
-            # another worker if this lock's lease has expired.
-            lock.release()
+            if acquired and lock is not None:
+                try:
+                    # Redis verifies the token, so this cannot release another process's lock.
+                    lock.release()
+                except Exception:
+                    logger.warning("Could not release Redis integrity lock for assignment %s", assignment_id)
 
 
 class TopicCoverage(BaseModel):

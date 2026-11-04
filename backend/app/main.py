@@ -1,4 +1,5 @@
 import uuid
+import logging
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,7 +12,7 @@ from app import models  # noqa: F401
 from app.api import analytics, announcements, assignments, auth, chat, courses, notes, submissions, users
 from app.api.deps import get_current_user, get_db
 from app.core.config import settings
-from app.core.database import Base, engine
+from app.core.database import Base, SessionLocal, engine
 from app.core.rate_limit import limiter
 from app.db.phase4_schema import ensure_submission_depth_columns
 from app.models.assignment import Assignment
@@ -22,6 +23,7 @@ from app.services.queue_service import queue_service
 import app.worker  # noqa: F401
 
 app = FastAPI(title="Vidyaranya Backend")
+logger = logging.getLogger("vidyaranya.api")
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
@@ -47,9 +49,27 @@ async def add_security_headers(request: Request, call_next):
 
 
 @app.on_event("startup")
-def on_startup() -> None:
+async def on_startup() -> None:
     Base.metadata.create_all(bind=engine)
     ensure_submission_depth_columns(engine)
+    if settings.QUEUE_MODE == "in_process":
+        db = SessionLocal()
+        try:
+            stranded = (
+                db.query(Submission)
+                .filter(Submission.status.in_(["pending_eval", "evaluating"]))
+                .all()
+            )
+            for submission in stranded:
+                submission.status = "pending_eval"
+            db.commit()
+            recovered_ids = [submission.id for submission in stranded]
+        finally:
+            db.close()
+        for submission_id in recovered_ids:
+            await queue_service.enqueue_submission_evaluation(submission_id)
+        if recovered_ids:
+            logger.info("Requeued %d interrupted in-process evaluations after startup", len(recovered_ids))
 
 
 @app.on_event("shutdown")

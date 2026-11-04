@@ -187,6 +187,7 @@ function NotesSection({ course, isFaculty, onNotesChanged }) {
 
 const STATUS_STYLES = {
   evaluating: 'bg-secondary text-secondary-foreground animate-pulse',
+  pending: 'bg-warning/15 text-warning',
   missing: 'border border-primary text-primary',
   pending_eval: 'bg-muted text-muted-foreground',
   graded: 'bg-secondary text-secondary-foreground',
@@ -353,6 +354,7 @@ function StudentSubmissionPanel({ assignment, onSubmit, refreshKey }) {
       {loading && <div className="flex items-center gap-2 text-xs text-muted-foreground"><Loader2 className="w-3.5 h-3.5 animate-spin" />Loading submission status…</div>}
       {pollError && <p role="alert" className="text-xs text-destructive ">Could not refresh evaluation status. <button type="button" onClick={() => refreshMine().catch((err) => showToast(err.response?.data?.detail || 'Retry failed.', 'error'))} className="font-semibold underline">Retry</button></p>}
       {status === 'pending_eval' || status === 'evaluating' ? <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">{['Submitted', 'Evaluating', 'Graded'].map((step, index) => { const complete = (index === 0) || (index === 1 && status === 'evaluating') || (index === 2 && status === 'graded'); return <span key={step} className={`inline-flex items-center gap-1 ${complete ? 'font-semibold text-primary ' : ''}`}>{complete ? <CheckCircle2 className="w-3.5 h-3.5" /> : <span className="w-3.5 h-3.5 rounded-full border border-border " />}{step}</span>; })}</div> : null}
+      {status === 'pending' && <div role="status" className="space-y-1 text-xs text-warning"><p>AI evaluation needs a retry or manual review. Please contact your instructor.</p>{submission?.feedback_text && <p>{submission.feedback_text}</p>}</div>}
       {status === 'awaiting_release' && <div className="flex items-center gap-2 rounded-lg bg-accent/15  px-3 py-2 text-xs text-accent-foreground "><LockKeyhole className="w-4 h-4 shrink-0" />Results will be released after the deadline.</div>}
       {status === 'flagged' && <div className="flex items-center gap-2 rounded-lg bg-warning/15  px-3 py-2 text-xs text-warning "><AlertTriangle className="w-4 h-4" />Your submission was flagged for review. Your instructor will follow up.</div>}
       {released && <div className="space-y-3 rounded-xl bg-success/15  border border-success/25  p-4">

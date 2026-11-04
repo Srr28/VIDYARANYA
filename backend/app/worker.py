@@ -9,6 +9,7 @@ exponential backoff and retry mechanisms.
 """
 
 import asyncio
+import hashlib
 import logging
 from pathlib import Path
 import re
@@ -23,14 +24,16 @@ from app.core.database import SessionLocal, engine
 from app.db.phase4_schema import ensure_submission_depth_columns
 from app.models.analytics_report import AnalyticsReport
 from app.models.assignment import Assignment
+from app.models.assignment_reference import AssignmentReference
 from app.models.course import Course
 from app.models.note import Note
 from app.models.submission import Submission
 from app.models.submission_text import SubmissionText
+from app.services.agents.eval_graph import integrity_node
 from app.services.grading_service import grade
 from app.services.ocr_service import extract_text_from_bytes
 from app.services.queue_service import get_redis_settings, queue_service
-from app.services.rag_service import index_note
+from app.services.rag_service import CHROMA_CLIENT, _encode_texts, index_note, retrieve_grading_context
 from app.services.storage_service import storage_service
 
 logger = logging.getLogger("vidyaranya.worker")
@@ -62,6 +65,117 @@ def _compute_mastery_level(score: float, max_score: float) -> str:
         return "Advanced"
 
 
+def _retrieve_assignment_context(
+    assignment: Assignment,
+    note_records: list[tuple[uuid.UUID, str, str]],
+) -> list[dict[str, str]]:
+    """Retrieve note grounding, rebuilding from object storage after Render cold starts."""
+    topics = list(dict.fromkeys(
+        [
+            str(item.get("criterion") or "").strip()
+            for item in (assignment.rubric or [])
+            if isinstance(item, dict) and str(item.get("criterion") or "").strip()
+        ]
+        + [str(topic).strip() for topic in (assignment.topics_list or []) if str(topic).strip()]
+    ))[:6]
+    if not topics:
+        topics = [assignment.title]
+
+    try:
+        contexts = retrieve_grading_context(
+            str(assignment.course_id),
+            topics,
+            note_id=str(assignment.reference_note_id) if assignment.reference_note_id else None,
+        )
+    except Exception:
+        logger.warning("Course-note retrieval failed for assignment %s", assignment.id, exc_info=True)
+        contexts = []
+    if contexts:
+        return contexts
+
+    topic_tokens = {
+        topic: {token for token in re.findall(r"[a-z0-9]+", topic.lower()) if len(token) > 2}
+        for topic in topics
+    }
+    ranked: list[tuple[int, dict[str, str]]] = []
+    seen: set[str] = set()
+    for note_id, note_title, file_key in note_records:
+        try:
+            raw_text = extract_text_from_bytes(
+                storage_service.download_file_bytes(file_key),
+                filename=file_key,
+            )
+        except Exception as exc:
+            logger.warning("Could not rebuild course note %s for grading (%s)", note_id, exc.__class__.__name__)
+            continue
+        if not raw_text.strip():
+            continue
+        try:
+            index_note(str(assignment.course_id), raw_text, note_id=str(note_id))
+        except Exception:
+            logger.warning("Could not rebuild note vectors for %s", note_id, exc_info=True)
+
+        chunks = [raw_text[index:index + 700].strip() for index in range(0, len(raw_text), 600)]
+        for topic, tokens in topic_tokens.items():
+            for chunk in chunks:
+                if not chunk or chunk in seen:
+                    continue
+                chunk_tokens = {token for token in re.findall(r"[a-z0-9]+", chunk.lower()) if len(token) > 2}
+                overlap = len(tokens & chunk_tokens)
+                if overlap:
+                    ranked.append((overlap, {
+                        "topic": topic,
+                        "source": f"note:{note_id} ({note_title})",
+                        "text": chunk,
+                    }))
+                    seen.add(chunk)
+
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    contexts = []
+    used_chars = 0
+    for _score, context in ranked:
+        remaining = 3600 - used_chars
+        if remaining <= 0:
+            break
+        context["text"] = context["text"][:min(700, remaining)]
+        contexts.append(context)
+        used_chars += len(context["text"])
+        if len(contexts) >= 6:
+            break
+    return contexts
+
+
+def _prime_integrity_index(
+    assignment_id: uuid.UUID,
+    prior_rows: list[tuple[uuid.UUID, str]],
+) -> None:
+    """Rebuild the per-assignment plagiarism index from durable submission text after cold starts."""
+    try:
+        collection = CHROMA_CLIENT.get_or_create_collection(name=f"submissions_{assignment_id}")
+        existing = collection.get(include=["metadatas"])
+        existing_ids = set(existing.get("ids") or [])
+        missing = [(str(submission_id), text) for submission_id, text in prior_rows if submission_id and text and str(submission_id) not in existing_ids]
+        for start in range(0, len(missing), 32):
+            batch = missing[start:start + 32]
+            if not batch:
+                continue
+            embeddings = _encode_texts([text for _submission_id, text in batch])
+            metadatas = [
+                {
+                    "submission_id": submission_id,
+                    "content_hash": hashlib.sha256(text.replace("\r\n", "\n").replace("\r", "\n").strip().encode("utf-8")).hexdigest(),
+                }
+                for submission_id, text in batch
+            ]
+            collection.upsert(
+                ids=[submission_id for submission_id, _text in batch],
+                embeddings=embeddings,
+                metadatas=metadatas,
+            )
+    except Exception as exc:
+        logger.warning("Could not warm integrity index for assignment %s (%s)", assignment_id, exc.__class__.__name__)
+
+
 def _is_rate_limit_error(exc: Exception) -> bool:
     """Detect Groq rate-limit errors, including token-limit responses returned as 413."""
     exc_str = str(exc).lower()
@@ -81,13 +195,56 @@ def _is_rate_limit_error(exc: Exception) -> bool:
 
 
 def _rate_limit_retry_after_seconds(exc: Exception) -> int | None:
-    """Extract Groq's suggested wait (for example, `20m46.7s`) when present."""
-    match = re.search(r"try again in\s+(?:(\d+)m)?(\d+(?:\.\d+)?)s", str(exc), re.IGNORECASE)
-    if not match:
-        return None
-    minutes = int(match.group(1) or 0)
-    seconds = float(match.group(2) or 0)
-    return max(1, int(minutes * 60 + seconds + 2))
+    """Use Groq's Retry-After/reset headers before falling back to message text."""
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", {}) or {}
+
+    def parse_duration(value: Any) -> int | None:
+        if value is None:
+            return None
+        try:
+            return max(1, int(float(value) + 1))
+        except (TypeError, ValueError):
+            pass
+        match = re.search(r"(?:(\d+)m)?(\d+(?:\.\d+)?)s", str(value), re.IGNORECASE)
+        if not match:
+            return None
+        minutes = int(match.group(1) or 0)
+        seconds = float(match.group(2) or 0)
+        return max(1, int(minutes * 60 + seconds + 1))
+
+    try:
+        retry_after = parse_duration(headers.get("retry-after"))
+        if retry_after is not None:
+            return retry_after
+        message = str(exc)
+        match = re.search(r"try again in\s+(?:(\d+)m)?(\d+(?:\.\d+)?)s", message, re.IGNORECASE)
+        if match:
+            minutes = int(match.group(1) or 0)
+            seconds = float(match.group(2) or 0)
+            return max(1, int(minutes * 60 + seconds + 1))
+
+        lower = message.lower()
+        if any(marker in lower for marker in ("tokens per minute", "tpm", "token limit")):
+            return parse_duration(headers.get("x-ratelimit-reset-tokens"))
+        if any(marker in lower for marker in ("requests per day", "rpd", "daily request")):
+            return parse_duration(headers.get("x-ratelimit-reset-requests"))
+    except Exception:
+        logger.debug("Could not parse Groq rate-limit headers", exc_info=True)
+    return None
+
+
+def _mark_evaluation_for_retry(submission: Submission, message: str) -> None:
+    """Store an actionable retry state instead of leaving a dead job pending forever."""
+    submission.status = "pending"
+    submission.ai_score = None
+    submission.mastery_level = None
+    submission.depth_score = None
+    submission.depth_label = None
+    submission.topic_scores = None
+    submission.feedback_text = message
+    submission.integrity_score = None
+    submission.plagiarism_flag = False
 
 
 async def startup(ctx: dict[str, Any]) -> None:
@@ -181,13 +338,40 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
         backoff_delay = settings.WORKER_RETRY_DELAY * (2 ** (attempt - 1))
 
         try:
-            grade_result = await asyncio.to_thread(grade, extracted_text, assignment.rubric or [])
+            reference_solution = (
+                db.query(AssignmentReference.solution_text)
+                .filter(AssignmentReference.assignment_id == assignment.id)
+                .scalar()
+                or ""
+            )
+            try:
+                note_query = db.query(Note.id, Note.title, Note.file_key).filter(Note.course_id == assignment.course_id)
+                if assignment.reference_note_id:
+                    note_query = note_query.filter(Note.id == assignment.reference_note_id)
+                else:
+                    note_query = note_query.order_by(Note.created_at.desc()).limit(3)
+                note_records = note_query.all()
+                course_context = await asyncio.to_thread(_retrieve_assignment_context, assignment, note_records)
+            except Exception:
+                logger.warning("Could not prepare RAG context for assignment %s", assignment.id, exc_info=True)
+                course_context = []
+            grade_result = await asyncio.to_thread(
+                grade,
+                extracted_text,
+                assignment.rubric or [],
+                reference_solution=reference_solution,
+                topics_list=assignment.topics_list or [],
+                course_context=course_context,
+            )
         except Exception as exc:
             if _is_rate_limit_error(exc):
                 provider_wait = _rate_limit_retry_after_seconds(exc)
-                retry_delay = max(backoff_delay, provider_wait or 0)
+                retry_delay = max(
+                    backoff_delay,
+                    provider_wait or settings.WORKER_RATE_LIMIT_DEFAULT_RETRY_SECONDS,
+                )
                 logger.warning(
-                    "Groq 429 Rate Limit hit for submission %s on attempt %d/%d. Backing off for %ds%s.",
+                    "Groq rate limit for submission %s on attempt %d/%d. Waiting %ds%s.",
                     submission_id,
                     attempt,
                     max_retries,
@@ -196,16 +380,35 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
                 )
                 if attempt < max_retries:
                     if ctx.get("is_fallback"):
+                        if retry_delay > 900:
+                            _mark_evaluation_for_retry(
+                                submission,
+                                "AI evaluation was paused because the provider quota resets later. "
+                                "Your instructor can retry the evaluation after the quota resets.",
+                            )
+                            db.commit()
+                            return {"status": submission.status, "submission_id": submission_id, "reason": "rate_limited"}
                         await asyncio.sleep(retry_delay)
                         ctx["job_try"] = attempt + 1
                         return await evaluate_submission_task(ctx, submission_id)
                     raise Retry(defer=retry_delay)
-                else:
-                    logger.error("Exceeded max retries for submission %s due to rate limits.", submission_id)
-                    raise exc
+                logger.error("Rate-limit retry budget exhausted for submission %s.", submission_id)
+                _mark_evaluation_for_retry(
+                    submission,
+                    "AI evaluation could not finish because the provider rate limit was reached. "
+                    "Your instructor can retry it later.",
+                )
+                db.commit()
+                return {"status": submission.status, "submission_id": submission_id, "reason": "rate_limited"}
             else:
                 logger.exception("Unexpected error evaluating submission %s: %s", submission_id, exc)
-                raise exc
+                _mark_evaluation_for_retry(
+                    submission,
+                    "AI evaluation could not finish because of a service error. "
+                    "Your instructor can retry it after checking the AI service configuration.",
+                )
+                db.commit()
+                return {"status": submission.status, "submission_id": submission_id, "reason": "evaluation_error"}
 
         if grade_result is None:
             grade_result = {
@@ -214,6 +417,34 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
                 "breakdown": [],
                 "general_feedback": "Automated evaluation completed with default parameters.",
             }
+
+        try:
+            prior_rows = (
+                db.query(Submission.id, SubmissionText.raw_text)
+                .join(SubmissionText, SubmissionText.submission_id == Submission.id)
+                .filter(
+                    Submission.assignment_id == assignment.id,
+                    Submission.id != submission.id,
+                    Submission.status.in_(["graded", "flagged"]),
+                )
+                .all()
+            )
+            await asyncio.to_thread(_prime_integrity_index, assignment.id, prior_rows)
+            integrity_result = await asyncio.to_thread(
+                integrity_node,
+                {
+                    "submission_id": str(submission.id),
+                    "assignment_id": str(assignment.id),
+                    "raw_text": extracted_text,
+                },
+            )
+            grade_result.update(integrity_result)
+        except Exception as exc:
+            logger.warning(
+                "Integrity check could not run for submission %s (%s); grading will continue",
+                submission_id,
+                exc.__class__.__name__,
+            )
 
         max_score_val = float(assignment.max_marks or grade_result.get("max_score", 100))
         ai_score_val = max(0.0, min(max_score_val, float(grade_result.get("total_score", 0))))
@@ -298,8 +529,17 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
             # Leave in pending_eval or flagged depending on error
             sub = db.query(Submission).filter(Submission.id == uuid.UUID(submission_id)).first()
             if sub and sub.status == "evaluating":
-                sub.status = "pending_eval"
+                if ctx.get("is_fallback") or attempt >= settings.WORKER_MAX_RETRIES:
+                    _mark_evaluation_for_retry(
+                        sub,
+                        "AI evaluation did not complete because of a service error. "
+                        "Your instructor can retry it after checking the service logs.",
+                    )
+                else:
+                    sub.status = "pending_eval"
                 db.commit()
+                if ctx.get("is_fallback") or attempt >= settings.WORKER_MAX_RETRIES:
+                    return {"status": sub.status, "submission_id": submission_id, "reason": "evaluation_error"}
         except Exception:
             pass
         raise exc
