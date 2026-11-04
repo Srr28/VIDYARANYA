@@ -85,6 +85,40 @@ def test_prepare_selects_rubric_feedback_when_course_material_is_missing(monkeyp
     assert result["execution_plan"] == ["integrity", "grade", "rubric_feedback"]
 
 
+def test_langgraph_runs_integrity_and_grade_in_parallel_before_feedback():
+    graph = eval_graph.build_evaluation_graph()
+    edges = {(edge.source, edge.target) for edge in graph.get_graph().edges}
+    assert ("prepare", "integrity") in edges
+    assert ("prepare", "grade") in edges
+    assert ("integrity", "feedback") in edges
+    assert ("grade", "feedback") in edges
+    assert ("feedback", "finalize") in edges
+
+
+def test_parallel_graph_merges_integrity_and_grade_before_feedback(monkeypatch):
+    monkeypatch.setattr(eval_graph, "prepare_node", lambda _state: {
+        "execution_plan": ["integrity", "grade", "rubric_feedback"],
+        "execution_step": 0,
+        "feedback_mode": "rubric",
+    })
+    monkeypatch.setattr(eval_graph, "integrity_node", lambda _state: {
+        "integrity_score": 0.91, "plagiarism_flag": False, "plagiarism_matches": []
+    })
+    monkeypatch.setattr(eval_graph, "grade_node", lambda _state: {
+        "topic_coverage": [], "mastery_result": {"total_score": 8}
+    })
+    monkeypatch.setattr(eval_graph, "feedback_node", lambda state: {
+        "feedback_markdown": f"score={state['mastery_result']['total_score']}; integrity={state['integrity_score']}"
+    })
+    monkeypatch.setattr(eval_graph, "finalize_node", lambda _state: {"final_status": "graded"})
+    monkeypatch.setattr(eval_graph, "EVALUATION_GRAPH", eval_graph.build_evaluation_graph())
+    monkeypatch.setattr(eval_graph, "_read_daily_token_usage", lambda: None)
+
+    result = eval_graph.run_evaluation_graph({"submission_id": "sub-graph"})
+    assert result["feedback_markdown"] == "score=8; integrity=0.91"
+    assert result["final_status"] == "graded"
+
+
 def test_single_chunk_uses_one_grade_call_and_returns_mastery_shape(monkeypatch):
     calls = []
 
@@ -236,7 +270,7 @@ def test_rate_headers_record_remaining_tokens_and_reset(monkeypatch):
 
 def test_feedback_rate_limit_resumes_from_grade_checkpoint(monkeypatch):
     monkeypatch.setattr(eval_graph.CHROMA_CLIENT, "get_collection", lambda **_kwargs: (_ for _ in ()).throw(ValueError("missing")))
-    monkeypatch.setitem(eval_graph._EVALUATION_STEPS, "integrity", lambda _state: {
+    monkeypatch.setattr(eval_graph, "integrity_node", lambda _state: {
         "integrity_score": 1.0, "plagiarism_flag": False, "plagiarism_matches": []
     })
     calls = {"grade": 0, "feedback": 0}

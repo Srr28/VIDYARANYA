@@ -943,6 +943,10 @@ def rubric_feedback_node(state: EvaluationState) -> EvaluationState:
     return _feedback_node(state, use_course_materials=False)
 
 
+def feedback_node(state: EvaluationState) -> EvaluationState:
+    return _feedback_node(state, use_course_materials=state.get("feedback_mode") == "rag")
+
+
 def finalize_node(state: EvaluationState) -> EvaluationState:
     return {"final_status": "flagged" if state.get("plagiarism_flag") else "graded"}
 
@@ -975,9 +979,13 @@ def _next_plan_route(state: EvaluationState) -> str:
 def _run_sequential(initial: EvaluationState) -> EvaluationState:
     state = dict(initial)
     state.update(prepare_node(state))
-    while int(state.get("execution_step", 0)) < len(state.get("execution_plan", [])):
-        state.update(execute_plan_node(state))
+    # Equivalent to the LangGraph supersteps, preserving node behavior and
+    # state merge semantics when the optional LangGraph package is unavailable.
+    state.update(integrity_node(state))
+    state.update(grade_node(state))
+    state.update(feedback_node(state))
     state.update(finalize_node(state))
+    state["execution_step"] = len(state.get("execution_plan", []))
     return state
 
 
@@ -986,15 +994,15 @@ def build_evaluation_graph():
         return None
     graph = StateGraph(EvaluationState)
     graph.add_node("prepare", prepare_node)
-    graph.add_node("execute_plan", execute_plan_node)
+    graph.add_node("integrity", integrity_node)
+    graph.add_node("grade", grade_node)
+    graph.add_node("feedback", feedback_node)
     graph.add_node("finalize", finalize_node)
     graph.set_entry_point("prepare")
-    graph.add_edge("prepare", "execute_plan")
-    graph.add_conditional_edges(
-        "execute_plan",
-        _next_plan_route,
-        {"execute_plan": "execute_plan", "finalize": "finalize"},
-    )
+    graph.add_edge("prepare", "integrity")
+    graph.add_edge("prepare", "grade")
+    graph.add_edge(["integrity", "grade"], "feedback")
+    graph.add_edge("feedback", "finalize")
     graph.add_edge("finalize", END)
     return graph.compile()
 
