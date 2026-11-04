@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.services.agents import eval_graph
+from app.services.agents import context_cache
 
 
 @pytest.fixture(autouse=True)
@@ -266,3 +267,25 @@ def test_feedback_rate_limit_resumes_from_grade_checkpoint(monkeypatch):
     assert calls["grade"] == 1
     assert calls["feedback"] == 2
     assert result["final_status"] == "graded"
+
+
+def test_compact_rubric_and_reference_digest_are_cached(monkeypatch, memory_checkpoint_redis):
+    rubric = [{
+        "criterion": "Evidence", "max_points": 5, "description": "d" * 240,
+    }]
+    compact = context_cache.build_compact_rubric(rubric)
+    assert len(compact.split(": ", 1)[1]) == 160
+
+    calls = []
+
+    def ask(model, system, user, **kwargs):
+        calls.append((model, kwargs.get("max_completion_tokens")))
+        return {"digest": "Core answer key facts."}
+
+    monkeypatch.setattr(eval_graph, "_ask_json", ask)
+    reference = "teacher reference answer"
+    assert context_cache.warm_reference_digest(reference) == "Core answer key facts."
+    assert context_cache.get_reference_digest(reference) == "Core answer key facts."
+    assert context_cache.warm_reference_digest(reference) == "Core answer key facts."
+    assert len(calls) == 1
+    assert calls[0][1] == 400

@@ -24,6 +24,7 @@ from typing import Any, Callable
 from pydantic import BaseModel, Field, ValidationError
 
 from app.core.config import settings
+from app.services.agents.context_cache import get_compact_rubric, get_reference_digest
 from app.services.agents.state import EvaluationState
 from app.services.rag_service import CHROMA_CLIENT, MODEL, _encode_texts
 
@@ -494,13 +495,26 @@ def prepare_node(state: EvaluationState) -> EvaluationState:
         course_material_count = 0
     feedback_step = "rag_feedback" if course_material_count > 0 else "rubric_feedback"
     plan = ["integrity", "grade", feedback_step]
+    rubric = state.get("rubric") or []
+    reference_solution = str(state.get("reference_solution") or "")
+    compact_rubric = get_compact_rubric(rubric)
+    reference_digest = get_reference_digest(reference_solution)
+    submission_chunks = _chunk_submission(state.get("raw_text", ""))
 
     logger.info(
         "Evaluation preparation selected plan for submission %s: %s",
         state["submission_id"],
         plan,
     )
-    return {"execution_plan": plan, "execution_step": 0}
+    return {
+        "execution_plan": plan,
+        "execution_step": 0,
+        "course_material_count": int(course_material_count),
+        "feedback_mode": "rag" if course_material_count > 0 else "rubric",
+        "compact_rubric": compact_rubric,
+        "reference_digest": reference_digest,
+        "submission_chunks": submission_chunks,
+    }
 
 
 def integrity_node(state: EvaluationState) -> EvaluationState:

@@ -24,6 +24,7 @@ class EvaluationState(TypedDict, total=False):
     feedback_markdown: str
     feedback_draft: str
     feedback_mode: str
+    course_material_count: int
     llm_stats: dict[str, Any]
     execution_plan: list[str]
     execution_step: int

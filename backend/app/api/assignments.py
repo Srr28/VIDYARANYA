@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import uuid
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -26,6 +26,7 @@ from app.schemas.assignment import (
 from app.services.storage_service import get_assignment_attachment_key, storage_service
 from app.services.file_validation import validate_uploaded_file
 from app.services.queue_service import queue_service
+from app.services.agents.context_cache import warm_assignment_context
 
 router = APIRouter(prefix="/assignments", tags=["assignments"])
 compat_router = APIRouter(tags=["assignments"])
@@ -81,6 +82,8 @@ def create_assignment(
     payload: AssignmentCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    *,
+    background_tasks: BackgroundTasks = None,
 ) -> Assignment:
     course = (
         db.query(Course)
@@ -103,10 +106,11 @@ def create_assignment(
     )
     db.add(assignment)
     db.flush()
-    if payload.private_reference_solution and payload.private_reference_solution.strip():
+    reference_solution = (payload.private_reference_solution or "").strip()
+    if reference_solution:
         db.add(AssignmentReference(
             assignment_id=assignment.id,
-            solution_text=payload.private_reference_solution.strip(),
+            solution_text=reference_solution,
         ))
     due_label = payload.due_date.strftime("%b %d, %Y %I:%M %p") if payload.due_date else "No due date"
     db.add(
@@ -118,6 +122,8 @@ def create_assignment(
     )
     db.commit()
     db.refresh(assignment)
+    if background_tasks is not None:
+        background_tasks.add_task(warm_assignment_context, assignment.rubric or [], reference_solution)
     return assignment
 
 
@@ -127,10 +133,12 @@ def create_assignment_for_course(
     payload: AssignmentCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    *,
+    background_tasks: BackgroundTasks = None,
 ) -> Assignment:
     if payload.course_id != course_id:
         raise HTTPException(status_code=400, detail="Course ID in path and request body do not match")
-    return create_assignment(payload, db, current_user)
+    return create_assignment(payload, db, current_user, background_tasks=background_tasks)
 
 
 def _require_assignment_owner(assignment_id: uuid.UUID, db: Session, current_user: User) -> Assignment:
@@ -164,8 +172,10 @@ def put_assignment_reference(
     payload: AssignmentReferenceUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    *,
+    background_tasks: BackgroundTasks = None,
 ) -> AssignmentReferenceOut:
-    _require_assignment_owner(assignment_id, db, current_user)
+    assignment = _require_assignment_owner(assignment_id, db, current_user)
     solution_text = payload.solution_text.strip()
     if not solution_text:
         raise HTTPException(status_code=422, detail="Answer key cannot be blank")
@@ -178,6 +188,8 @@ def put_assignment_reference(
     else:
         reference.solution_text = solution_text
     db.commit()
+    if background_tasks is not None:
+        background_tasks.add_task(warm_assignment_context, assignment.rubric or [], solution_text)
     return AssignmentReferenceOut(solution_text=reference.solution_text)
 
 
@@ -235,6 +247,8 @@ def update_assignment(
     payload: AssignmentUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    *,
+    background_tasks: BackgroundTasks = None,
 ) -> Assignment:
     assignment = db.query(Assignment).filter(Assignment.id == assignment_id).first()
     if not assignment:
@@ -267,6 +281,16 @@ def update_assignment(
         setattr(assignment, field, value)
     db.commit()
     db.refresh(assignment)
+    if "rubric" in changes and background_tasks is not None:
+        reference_text = (
+            db.query(AssignmentReference.solution_text)
+            .filter(AssignmentReference.assignment_id == assignment_id)
+            .scalar()
+            or ""
+        )
+        background_tasks.add_task(
+            warm_assignment_context, assignment.rubric or [], reference_text
+        )
     return assignment
 
 
