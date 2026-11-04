@@ -238,6 +238,8 @@ def _rate_limit_retry_after_seconds(exc: Exception) -> int | None:
 def _mark_evaluation_for_retry(submission: Submission, message: str) -> None:
     """Store an actionable retry state instead of leaving a dead job pending forever."""
     submission.status = "pending"
+    submission.evaluation_stage = "retry_required"
+    submission.evaluation_progress = 0
     submission.ai_score = None
     submission.mastery_level = None
     submission.depth_score = None
@@ -283,6 +285,8 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
 
         # Update status to 'evaluating'
         submission.status = "evaluating"
+        submission.evaluation_stage = "preparing_submission"
+        submission.evaluation_progress = 10
         db.commit()
         db.refresh(submission)
 
@@ -290,6 +294,8 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
         if not assignment:
             logger.error("Assignment %s not found for submission %s", submission.assignment_id, submission_id)
             submission.status = "pending_eval"
+            submission.evaluation_stage = "retry_required"
+            submission.evaluation_progress = 0
             db.commit()
             return {"status": "assignment_not_found"}
 
@@ -317,6 +323,8 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
             # Never convert an unreadable/unsupported upload into an AI zero.
             # Leave it for teacher review and tell the student what happened.
             submission.status = "pending"
+            submission.evaluation_stage = "needs_review"
+            submission.evaluation_progress = 0
             submission.ai_score = None
             submission.mastery_level = None
             submission.depth_score = None
@@ -330,6 +338,10 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
             submission.plagiarism_flag = False
             db.commit()
             return {"status": submission.status, "submission_id": submission_id, "reason": "no_readable_text"}
+
+        submission.evaluation_stage = "retrieving_course_materials"
+        submission.evaluation_progress = 25
+        db.commit()
 
         # Keep production grading to one rubric-based model request. The former
         # graph made several LLM calls and required Redis for its integrity lock,
@@ -356,6 +368,9 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
             except Exception:
                 logger.warning("Could not prepare RAG context for assignment %s", assignment.id, exc_info=True)
                 course_context = []
+            submission.evaluation_stage = "grading_submission"
+            submission.evaluation_progress = 45
+            db.commit()
             grade_result = await asyncio.to_thread(
                 grade,
                 extracted_text,
@@ -380,6 +395,9 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
                     retry_delay,
                     " (provider retry-after)" if provider_wait else "",
                 )
+                submission.evaluation_stage = "waiting_for_ai_capacity"
+                submission.evaluation_progress = 45
+                db.commit()
                 if attempt < max_retries:
                     if ctx.get("is_fallback"):
                         if retry_delay > 900:
@@ -420,6 +438,10 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
                 "general_feedback": "Automated evaluation completed with default parameters.",
             }
 
+        submission.evaluation_stage = "checking_integrity"
+        submission.evaluation_progress = 80
+        db.commit()
+
         try:
             prior_rows = (
                 db.query(Submission.id, SubmissionText.raw_text)
@@ -459,6 +481,8 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
         integrity_sc = float(integrity_value) if integrity_value is not None else None
         plagiarism_flag_val = bool(grade_result.get("plagiarism_flag", False))
 
+        submission.evaluation_stage = "saving_results"
+        submission.evaluation_progress = 92
         submission.ai_score = ai_score_val
         submission.mastery_level = mastery_lvl
         submission.depth_score = grade_result.get("depth_score")
@@ -468,6 +492,8 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
         submission.integrity_score = integrity_sc
         submission.plagiarism_flag = plagiarism_flag_val
         submission.status = "flagged" if plagiarism_flag_val else "graded"
+        submission.evaluation_stage = "complete"
+        submission.evaluation_progress = 100
 
         # Update or create submission_texts record
         sub_text = db.query(SubmissionText).filter(SubmissionText.submission_id == submission.id).first()
@@ -519,6 +545,8 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
             sub = db.query(Submission).filter(Submission.id == uuid.UUID(submission_id)).first()
             if sub and sub.status == "evaluating":
                 sub.status = "pending_eval"
+                sub.evaluation_stage = "queued"
+                sub.evaluation_progress = 0
                 db.commit()
         except Exception:
             db.rollback()
@@ -539,6 +567,8 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
                     )
                 else:
                     sub.status = "pending_eval"
+                    sub.evaluation_stage = "queued"
+                    sub.evaluation_progress = 0
                 db.commit()
                 if ctx.get("is_fallback") or attempt >= settings.WORKER_MAX_RETRIES:
                     return {"status": sub.status, "submission_id": submission_id, "reason": "evaluation_error"}

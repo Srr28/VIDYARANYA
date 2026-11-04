@@ -62,6 +62,8 @@ async def on_startup() -> None:
             )
             for submission in stranded:
                 submission.status = "pending_eval"
+                submission.evaluation_stage = "queued"
+                submission.evaluation_progress = 0
             db.commit()
             recovered_ids = [submission.id for submission in stranded]
         finally:

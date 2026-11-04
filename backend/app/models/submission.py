@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, JSON, Numeric, String, Text, Uuid, func, text
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Integer, JSON, Numeric, String, Text, Uuid, func, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -42,6 +42,8 @@ class Submission(Base):
     mastery_level: Mapped[str | None] = mapped_column(String(50), nullable=True)
     depth_score: Mapped[float | None] = mapped_column(Numeric(3, 2), nullable=True)
     depth_label: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    evaluation_progress: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    evaluation_stage: Mapped[str | None] = mapped_column(String(64), nullable=True)
     topic_scores: Mapped[dict | list | None] = mapped_column(
         JSON().with_variant(JSONB, "postgresql"),
         nullable=True,

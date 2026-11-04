@@ -198,6 +198,82 @@ const STATUS_STYLES = {
   default: 'bg-muted text-muted-foreground',
 };
 
+const EVALUATION_PROGRESS_STEPS = [
+  { label: 'Queued', stage: 0 },
+  { label: 'Preparing', stage: 1 },
+  { label: 'AI grading', stage: 2 },
+  { label: 'Checking', stage: 3 },
+  { label: 'Complete', stage: 4 },
+];
+
+const EVALUATION_STAGE_INFO = {
+  queued: { label: 'Queued for evaluation', step: 0 },
+  preparing_submission: { label: 'Reading your submission', step: 1 },
+  retrieving_course_materials: { label: 'Finding relevant course materials', step: 1 },
+  grading_submission: { label: 'Scoring the rubric and writing feedback', step: 2 },
+  waiting_for_ai_capacity: { label: 'Waiting for AI capacity', step: 2 },
+  checking_integrity: { label: 'Checking submission originality', step: 3 },
+  saving_results: { label: 'Saving your evaluation', step: 3 },
+  complete: { label: 'Evaluation complete', step: 4 },
+};
+
+function EvaluationProgress({ submission, now }) {
+  const stageInfo = EVALUATION_STAGE_INFO[submission?.evaluation_stage] || EVALUATION_STAGE_INFO.queued;
+  const reportedProgress = Number(submission?.evaluation_progress);
+  const progress = submission?.evaluation_progress != null && Number.isFinite(reportedProgress)
+    ? Math.max(0, Math.min(100, reportedProgress))
+    : submission?.status === 'evaluating' ? 10 : 0;
+  const startedAt = submission?.created_at ? Date.parse(submission.created_at) : NaN;
+  const elapsedSeconds = Number.isFinite(startedAt) ? Math.max(0, Math.floor((now - startedAt) / 1000)) : null;
+  const elapsedLabel = elapsedSeconds == null
+    ? ''
+    : elapsedSeconds < 60
+      ? `${elapsedSeconds}s`
+      : `${Math.floor(elapsedSeconds / 60)}m ${elapsedSeconds % 60}s`;
+
+  return (
+    <section aria-live="polite" className="space-y-3 rounded-xl border border-primary/15 bg-primary/5 p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-start gap-2.5">
+          <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-primary" />
+          <div>
+            <p className="text-sm font-semibold text-foreground">AI evaluation in progress</p>
+            <p className="mt-0.5 text-xs text-muted-foreground">{stageInfo.label}</p>
+          </div>
+        </div>
+        <span className="shrink-0 text-xs font-semibold text-primary" title="Milestone progress, not a time estimate">{progress}% milestones</span>
+      </div>
+      <div
+        role="progressbar"
+        aria-label="Assignment evaluation milestone progress"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={progress}
+        className="h-2 overflow-hidden rounded-full bg-muted"
+      >
+        <div className="h-full rounded-full bg-primary transition-[width] duration-500" style={{ width: `${progress}%` }} />
+      </div>
+      <ol className="grid grid-cols-5 gap-1 text-center">
+        {EVALUATION_PROGRESS_STEPS.map((step, index) => {
+          const complete = stageInfo.step > step.stage || (stageInfo.step === 4 && step.stage === 4);
+          const current = stageInfo.step === step.stage && stageInfo.step < 4;
+          return (
+            <li key={step.label} className={`space-y-1 text-[10px] sm:text-xs ${complete || current ? 'font-semibold text-primary' : 'text-muted-foreground'}`}>
+              <span className="mx-auto flex h-5 w-5 items-center justify-center">
+                {complete ? <CheckCircle2 className="h-4 w-4" /> : current && index < EVALUATION_PROGRESS_STEPS.length - 1 ? <span className="h-2 w-2 animate-pulse rounded-full bg-primary" /> : <span className="h-1.5 w-1.5 rounded-full bg-current opacity-40" />}
+              </span>
+              <span>{step.label}</span>
+            </li>
+          );
+        })}
+      </ol>
+      <p className="text-[11px] text-muted-foreground">
+        {elapsedLabel ? `Elapsed ${elapsedLabel}. ` : ''}AI response time can vary when the provider is busy; this status updates automatically.
+      </p>
+    </section>
+  );
+}
+
 function SubmissionComments({ submissionId }) {
   const [comments, setComments] = useState([]);
   const [comment, setComment] = useState('');
@@ -353,7 +429,7 @@ function StudentSubmissionPanel({ assignment, onSubmit, refreshKey }) {
       </div>
       {loading && <div className="flex items-center gap-2 text-xs text-muted-foreground"><Loader2 className="w-3.5 h-3.5 animate-spin" />Loading submission status…</div>}
       {pollError && <p role="alert" className="text-xs text-destructive ">Could not refresh evaluation status. <button type="button" onClick={() => refreshMine().catch((err) => showToast(err.response?.data?.detail || 'Retry failed.', 'error'))} className="font-semibold underline">Retry</button></p>}
-      {status === 'pending_eval' || status === 'evaluating' ? <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">{['Submitted', 'Evaluating', 'Graded'].map((step, index) => { const complete = (index === 0) || (index === 1 && status === 'evaluating') || (index === 2 && status === 'graded'); return <span key={step} className={`inline-flex items-center gap-1 ${complete ? 'font-semibold text-primary ' : ''}`}>{complete ? <CheckCircle2 className="w-3.5 h-3.5" /> : <span className="w-3.5 h-3.5 rounded-full border border-border " />}{step}</span>; })}</div> : null}
+      {(status === 'pending_eval' || status === 'evaluating') && <EvaluationProgress submission={submission} now={now} />}
       {status === 'pending' && <div role="status" className="space-y-1 text-xs text-warning"><p>AI evaluation needs a retry or manual review. Please contact your instructor.</p>{submission?.feedback_text && <p>{submission.feedback_text}</p>}</div>}
       {status === 'awaiting_release' && <div className="flex items-center gap-2 rounded-lg bg-accent/15  px-3 py-2 text-xs text-accent-foreground "><LockKeyhole className="w-4 h-4 shrink-0" />Results will be released after the deadline.</div>}
       {status === 'flagged' && <div className="flex items-center gap-2 rounded-lg bg-warning/15  px-3 py-2 text-xs text-warning "><AlertTriangle className="w-4 h-4" />Your submission was flagged for review. Your instructor will follow up.</div>}

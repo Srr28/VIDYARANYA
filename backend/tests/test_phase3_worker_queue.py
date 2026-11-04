@@ -261,6 +261,8 @@ def test_evaluate_submission_task_success(mock_db_scope, sample_data):
             assert db_sub.status == "graded"
             assert float(db_sub.ai_score) == 85.0
             assert db_sub.mastery_level == "Advanced"
+            assert db_sub.evaluation_stage == "complete"
+            assert db_sub.evaluation_progress == 100
             assert db_sub.feedback_text == "Excellent data structure comprehension."
 
             # Verify SubmissionText was saved
@@ -443,6 +445,8 @@ def test_full_submission_to_graded_lifecycle(mock_db_scope, sample_data):
             assert status_res["status"] == "graded"
             assert status_res["ai_score"] == 92.0
             assert status_res["mastery_level"] == "Advanced"
+            assert status_res["evaluation_stage"] == "complete"
+            assert status_res["evaluation_progress"] == 100
             assert "Outstanding" in status_res["feedback_text"]
 
     asyncio.run(_run())

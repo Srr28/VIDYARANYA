@@ -195,6 +195,8 @@ async def reevaluate_assignment_submissions(
         submission.mastery_level = None
         submission.depth_score = None
         submission.depth_label = None
+        submission.evaluation_progress = 0
+        submission.evaluation_stage = "queued"
         submission.topic_scores = None
         submission.feedback_text = None
         submission.integrity_score = None

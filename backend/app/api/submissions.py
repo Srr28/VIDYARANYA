@@ -267,6 +267,8 @@ async def _handle_submission(
             mastery_level=None,
             depth_score=None,
             depth_label=None,
+            evaluation_progress=0,
+            evaluation_stage="queued",
             topic_scores=None,
             feedback_text=None,
             integrity_score=None,
@@ -284,6 +286,8 @@ async def _handle_submission(
         submission.mastery_level = None
         submission.depth_score = None
         submission.depth_label = None
+        submission.evaluation_progress = 0
+        submission.evaluation_stage = "queued"
         submission.topic_scores = None
         submission.feedback_text = None
         submission.final_score = None
@@ -327,6 +331,8 @@ async def _handle_submission(
         "ai_score": submission.ai_score,
         "ai_feedback": submission.ai_feedback,
         "mastery_level": submission.mastery_level,
+        "evaluation_progress": submission.evaluation_progress,
+        "evaluation_stage": submission.evaluation_stage,
         "topic_scores": submission.topic_scores,
         "feedback_text": submission.feedback_text,
     }
@@ -355,6 +361,8 @@ def get_submission(
         "status": _student_visible_status(submission, results_released),
         "results_released": results_released,
         "file_name": _submitted_file_name(submission),
+        "evaluation_progress": submission.evaluation_progress,
+        "evaluation_stage": submission.evaluation_stage,
         "ai_score": submission.ai_score if results_released else None,
         "ai_feedback": submission.ai_feedback if results_released else None,
         "mastery_level": submission.mastery_level if results_released else None,
@@ -408,6 +416,8 @@ def get_my_submission_for_assignment(
             "status": _student_visible_status(submission, results_released),
             "file_name": _submitted_file_name(submission),
             "results_released": results_released,
+            "evaluation_progress": submission.evaluation_progress,
+            "evaluation_stage": submission.evaluation_stage,
             "ai_score": submission.ai_score if results_released else None,
             "final_score": submission.final_score if results_released else None,
             "effective_score": _effective_score(submission) if results_released else None,
@@ -874,6 +884,9 @@ def get_ai_evaluation_status(
         "submission_id": str(submission.id),
         "status": _student_visible_status(submission, results_released),
         "results_released": results_released,
+        "evaluation_progress": submission.evaluation_progress,
+        "evaluation_stage": submission.evaluation_stage,
+        "created_at": submission.created_at,
     }
     if not results_released:
         return result

@@ -1,10 +1,11 @@
 from pathlib import Path
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 
 from app.core.config import settings
+from app.db.phase4_schema import ensure_submission_depth_columns
 
 
 def test_supabase_sql_script_contains_all_phase2_elements():
@@ -66,3 +67,16 @@ def test_alembic_script_discovery():
 
     assert "0001_phase2_uuid_schema" in rev_ids
     assert "0002_phase2_supabase_rls" in rev_ids
+    assert "0004_submission_evaluation_progress" in rev_ids
+
+
+def test_startup_schema_upgrade_adds_evaluation_progress_columns():
+    engine = create_engine("sqlite:///:memory:")
+    with engine.begin() as connection:
+        connection.exec_driver_sql("CREATE TABLE submissions (id INTEGER PRIMARY KEY)")
+
+    ensure_submission_depth_columns(engine)
+    columns = {column["name"] for column in inspect(engine).get_columns("submissions")}
+
+    assert "evaluation_progress" in columns
+    assert "evaluation_stage" in columns
