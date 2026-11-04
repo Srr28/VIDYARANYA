@@ -45,9 +45,10 @@ _legacy_grade = grade
 
 try:
     from arq import cron
-    from arq.worker import Retry
+    from arq.worker import Retry, func
 except ImportError:
     cron = None
+    func = None
 
     class Retry(Exception):  # type: ignore
         def __init__(self, defer: int = 5) -> None:
@@ -592,8 +593,15 @@ queue_service.register_fallback_handler("generate_class_analytics_task", generat
 
 class WorkerSettings:
     """ARQ Worker configuration settings."""
+    # Daily-budget deferrals are capped at one hour, so keep the evaluation
+    # job retryable long enough to cross UTC midnight and observe the reset.
+    evaluation_function = (
+        func(evaluate_submission_task, max_tries=max(48, settings.WORKER_MAX_RETRIES))
+        if func is not None
+        else evaluate_submission_task
+    )
     functions = [
-        evaluate_submission_task,
+        evaluation_function,
         index_note_task,
         generate_class_analytics_task,
     ]
