@@ -42,6 +42,8 @@ _GROQ_TOKEN_RESERVATIONS: dict[str, deque[_TokenReservation]] = {}
 _GROQ_PROVIDER_LIMITS: dict[str, tuple[int, float]] = {}
 _GROQ_RATE_LIMIT_LOCK = threading.Lock()
 _GROQ_STATS_LOCAL = threading.local()
+_EVALUATION_METRICS: dict[str, dict[str, Any]] = {}
+_EVALUATION_METRICS_LOCK = threading.Lock()
 _INTEGRITY_INDEX_LOCK = threading.Lock()
 _REDIS_LOCK_CLIENT: Any | None = None
 _REDIS_LOCK_CLIENT_GUARD = threading.Lock()
@@ -134,6 +136,66 @@ def _client():
     if Groq is None or not settings.GROQ_API_KEY:
         return None
     return Groq(api_key=settings.GROQ_API_KEY, max_retries=0)
+
+
+def _start_evaluation_metrics(state: EvaluationState) -> None:
+    submission_id = str(state.get("submission_id") or "")
+    if not submission_id:
+        return
+    with _EVALUATION_METRICS_LOCK:
+        _EVALUATION_METRICS[submission_id] = {
+            "llm_calls": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "seconds_spent_waiting_on_limiter": 0.0,
+            "chunks": 0,
+            "checkpoint_hits": 0,
+            "feedback_mode": "unknown",
+            "started_at": time.monotonic(),
+        }
+
+
+def _bind_evaluation_metrics(state: EvaluationState) -> None:
+    _GROQ_STATS_LOCAL.submission_id = str(state.get("submission_id") or "")
+
+
+def _record_evaluation_metrics(submission_id: str | None, **values: Any) -> None:
+    if not submission_id:
+        return
+    with _EVALUATION_METRICS_LOCK:
+        metrics = _EVALUATION_METRICS.get(str(submission_id))
+        if not metrics:
+            return
+        for key, value in values.items():
+            if key == "feedback_mode":
+                metrics[key] = value
+            elif key == "seconds_spent_waiting_on_limiter":
+                metrics[key] += float(value or 0)
+            else:
+                metrics[key] += int(value or 0)
+
+
+def _finish_evaluation_metrics(submission_id: str | None) -> dict[str, Any] | None:
+    if not submission_id:
+        return None
+    with _EVALUATION_METRICS_LOCK:
+        metrics = _EVALUATION_METRICS.get(str(submission_id))
+        if not metrics:
+            return None
+        result = {
+            key: value
+            for key, value in metrics.items()
+            if key != "started_at"
+        }
+        result["wall_seconds"] = round(time.monotonic() - metrics["started_at"], 3)
+        return result
+
+
+def _clear_evaluation_metrics(submission_id: str | None) -> None:
+    if submission_id:
+        with _EVALUATION_METRICS_LOCK:
+            _EVALUATION_METRICS.pop(str(submission_id), None)
 
 
 def _extract_json(text: str) -> dict[str, Any]:
@@ -314,9 +376,7 @@ def _load_checkpoint(state: EvaluationState, step: str) -> dict[str, Any] | None
         raw = client.get(key) if client is not None else None
         value = json.loads(raw) if raw else None
         if isinstance(value, dict):
-            stats = getattr(_GROQ_STATS_LOCAL, "value", None)
-            if stats is not None:
-                stats["checkpoint_hits"] += 1
+            _record_evaluation_metrics(str(state.get("submission_id") or ""), checkpoint_hits=1)
             return value
     except Exception:
         logger.warning("Could not read evaluation checkpoint %s; continuing without it", step, exc_info=True)
@@ -402,13 +462,14 @@ def _ask_json(
     total_tokens = int(getattr(usage, "total_tokens", 0) or prompt_tokens + completion_tokens)
     _reconcile_groq_reservation(reservation, total_tokens)
     _record_daily_token_usage(total_tokens)
-    stats = getattr(_GROQ_STATS_LOCAL, "value", None)
-    if stats is not None:
-        stats["llm_calls"] += 1
-        stats["prompt_tokens"] += prompt_tokens
-        stats["completion_tokens"] += completion_tokens
-        stats["total_tokens"] += total_tokens
-        stats["seconds_spent_waiting_on_limiter"] += waited
+    _record_evaluation_metrics(
+        getattr(_GROQ_STATS_LOCAL, "submission_id", None),
+        llm_calls=1,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+        seconds_spent_waiting_on_limiter=waited,
+    )
     return _extract_json(completion.choices[0].message.content or "")
 
 
@@ -500,6 +561,11 @@ def prepare_node(state: EvaluationState) -> EvaluationState:
     compact_rubric = get_compact_rubric(rubric)
     reference_digest = get_reference_digest(reference_solution)
     submission_chunks = _chunk_submission(state.get("raw_text", ""))
+    _record_evaluation_metrics(
+        str(state.get("submission_id") or ""),
+        chunks=len(submission_chunks),
+        feedback_mode="rag" if course_material_count > 0 else "rubric",
+    )
 
     logger.info(
         "Evaluation preparation selected plan for submission %s: %s",
@@ -608,6 +674,8 @@ def integrity_node(state: EvaluationState) -> EvaluationState:
 
 _GRADE_SYSTEM = (
     "Grade academic work fairly against the supplied rubric. Accept valid alternative approaches. "
+    "The supplied submission text may be one excerpt of a longer work, so score evidence in that excerpt "
+    "without treating a criterion as absent from the complete work. "
     "Return JSON only: {\"c\":[{\"t\":\"criterion\",\"s\":0,\"e\":[],\"m\":[]}],"
     "\"b\":{\"s\":1,\"l\":\"surface\"}}. Include every criterion exactly once. Scores are 0-10. "
     "Give at most 2 evidence strings and 2 concrete missing rubric elements per criterion, each at most 120 chars. "
@@ -741,6 +809,7 @@ def _build_mastery(state: EvaluationState, coverage: list[dict[str, Any]], depth
 
 def grade_node(state: EvaluationState) -> EvaluationState:
     """Score each text chunk once, synthesize only multi-chunk work, then map to the stable result shape."""
+    _bind_evaluation_metrics(state)
     cached_grade = _load_checkpoint(state, "grade_result")
     if cached_grade is not None:
         return cached_grade
@@ -760,7 +829,7 @@ def grade_node(state: EvaluationState) -> EvaluationState:
     per_chunk: list[list[dict[str, Any]]] = []
     depths: list[dict[str, Any]] = []
     for index, chunk in enumerate(chunks, start=1):
-        user = f"{static_context}\nSubmission part {index}/{len(chunks)} (score evidence in this part only):\n{chunk}"
+        user = f"{static_context}\nSubmission text:\n{chunk}"
         result = _checkpointed_json(state, f"grade_chunk_{index}", settings.GROQ_MODEL, _GRADE_SYSTEM, user)
         coverage, depth = _map_compact_coverage(result, topics, str(state.get("submission_id", "unknown")), f"chunk {index}")
         if not result.get("c") and not result.get("topics"):
@@ -822,6 +891,7 @@ def _feedback_node(
     state: EvaluationState,
     use_course_materials: bool,
 ) -> EvaluationState:
+    _bind_evaluation_metrics(state)
     cached_feedback = _load_checkpoint(state, "feedback_result")
     if cached_feedback is not None:
         return cached_feedback
@@ -948,7 +1018,15 @@ def feedback_node(state: EvaluationState) -> EvaluationState:
 
 
 def finalize_node(state: EvaluationState) -> EvaluationState:
-    return {"final_status": "flagged" if state.get("plagiarism_flag") else "graded"}
+    submission_id = str(state.get("submission_id") or "")
+    metrics = _finish_evaluation_metrics(submission_id)
+    if metrics is not None:
+        structured = {"submission_id": submission_id, **metrics}
+        logger.info("EVALUATION_METRICS %s", json.dumps(structured, sort_keys=True, separators=(",", ":")))
+    return {
+        "final_status": "flagged" if state.get("plagiarism_flag") else "graded",
+        **({"llm_stats": metrics} if metrics is not None else {}),
+    }
 
 
 _EVALUATION_STEPS: dict[str, Callable[[EvaluationState], EvaluationState]] = {
@@ -1013,6 +1091,12 @@ EVALUATION_GRAPH = build_evaluation_graph()
 def run_evaluation_graph(initial: EvaluationState) -> EvaluationState:
     """Run the compiled Phase 4 graph and return its final state."""
     _check_daily_token_budget()
-    if EVALUATION_GRAPH is None:
-        return _run_sequential(initial)
-    return EVALUATION_GRAPH.invoke(initial)
+    submission_id = str(initial.get("submission_id") or "")
+    _start_evaluation_metrics(initial)
+    try:
+        if EVALUATION_GRAPH is None:
+            return _run_sequential(initial)
+        return EVALUATION_GRAPH.invoke(initial)
+    finally:
+        _clear_evaluation_metrics(submission_id)
+        _GROQ_STATS_LOCAL.submission_id = None

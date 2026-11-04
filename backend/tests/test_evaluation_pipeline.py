@@ -1,4 +1,6 @@
 import fnmatch
+import json
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -323,3 +325,24 @@ def test_compact_rubric_and_reference_digest_are_cached(monkeypatch, memory_chec
     assert context_cache.warm_reference_digest(reference) == "Core answer key facts."
     assert len(calls) == 1
     assert calls[0][1] == 400
+
+
+def test_finalize_emits_one_structured_metrics_record(caplog):
+    state = {"submission_id": "sub-metrics", "raw_text": "answer", "plagiarism_flag": False}
+    eval_graph._start_evaluation_metrics(state)
+    eval_graph._record_evaluation_metrics(
+        "sub-metrics",
+        llm_calls=2, prompt_tokens=1000, completion_tokens=300, total_tokens=1300,
+        seconds_spent_waiting_on_limiter=1.25, chunks=1, checkpoint_hits=1, feedback_mode="rubric",
+    )
+    with caplog.at_level(logging.INFO, logger="vidyaranya.evaluation"):
+        result = eval_graph.finalize_node(state)
+    records = [record.message for record in caplog.records if record.message.startswith("EVALUATION_METRICS ")]
+    assert len(records) == 1
+    metrics = json.loads(records[0].split(" ", 1)[1])
+    assert metrics["submission_id"] == "sub-metrics"
+    assert metrics["llm_calls"] == 2
+    assert metrics["total_tokens"] == 1300
+    assert metrics["seconds_spent_waiting_on_limiter"] == 1.25
+    assert result["llm_stats"]["feedback_mode"] == "rubric"
+    eval_graph._clear_evaluation_metrics("sub-metrics")

@@ -128,6 +128,11 @@ def warm_reference_digest(reference_text: str) -> str:
         return source[:MAX_REFERENCE_DIGEST_CHARS]
 
 
+def build_reference_digest(reference_text: str) -> str:
+    """Build an assignment digest asynchronously through the caller's background task."""
+    return warm_reference_digest(reference_text)
+
+
 def warm_assignment_context(rubric: list[dict[str, Any]], reference_text: str = "") -> None:
     """Warm cheap rubric formatting and answer-key digest after assignment writes."""
     get_compact_rubric(rubric or [])
