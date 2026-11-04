@@ -93,3 +93,43 @@ def test_three_chunks_use_one_grade_call_each_and_one_synthesis(monkeypatch):
     assert len(calls) == 4
     assert calls.count(eval_graph._SYNTHESIS_SYSTEM) == 1
     assert result["mastery_result"]["topic_scores"][0]["coverage_score"] == 7
+
+
+def test_fully_met_submission_skips_feedback_llm(monkeypatch):
+    monkeypatch.setattr(
+        eval_graph, "_ask_json",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("fully met work must not call Groq for feedback")),
+    )
+    result = eval_graph.rubric_feedback_node({
+        "mastery_result": {"topic_scores": [{"topic": "Criterion", "coverage_score": 10, "score": 10, "max_points": 10, "missing": []}]}
+    })
+    assert "What You Did Well" in result["feedback_markdown"]
+
+
+def test_feedback_context_is_limited_to_three_400_char_chunks(monkeypatch):
+    class Collection:
+        def query(self, **_kwargs):
+            return {
+                "documents": [["x" * 800 for _ in range(5)]],
+                "metadatas": [[{"source": "unit"} for _ in range(5)]],
+            }
+
+    monkeypatch.setattr(eval_graph.CHROMA_CLIENT, "get_collection", lambda **_kwargs: Collection())
+    monkeypatch.setattr(eval_graph, "_encode_texts", lambda _texts: [[0.1, 0.2]])
+    captured = []
+
+    def ask(_model, _system, user):
+        captured.append(user)
+        return {"feedback_markdown": "Review the concepts."}
+
+    monkeypatch.setattr(eval_graph, "_ask_json", ask)
+    eval_graph.rag_feedback_node({
+        "course_id": "course-1",
+        "mastery_result": {"topic_scores": [
+            {"topic": f"Topic {index}", "coverage_score": 4, "score": 4, "max_points": 10, "missing": ["detail"]}
+            for index in range(3)
+        ]},
+    })
+    context = captured[0].split("Course context (max 3 chunks, 400 chars each):\n", 1)[1]
+    assert context.count("[Topic ") == 3
+    assert context.count("x" * 401) == 0

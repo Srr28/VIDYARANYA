@@ -581,8 +581,11 @@ def _feedback_node(
         except Exception:
             pass
 
+    retrieved_count = 0
     if collection is not None:
         for item in weak_topics:
+            if retrieved_count >= 3:
+                break
             topic = str(item.get("topic", "General"))
             try:
                 result = collection.query(
@@ -592,11 +595,17 @@ def _feedback_node(
                 )
                 documents = (result.get("documents") or [[]])[0]
                 metadatas = (result.get("metadatas") or [[]])[0]
-                retrieved[topic] = [
-                    {"text": str(document), "source": (metadatas[index] if index < len(metadatas) else {}).get("source", "course material")}
-                    for index, document in enumerate(documents)
-                    if document
-                ]
+                selected = []
+                for index, document in enumerate(documents):
+                    if not document or retrieved_count >= 3:
+                        continue
+                    metadata = metadatas[index] if index < len(metadatas) and isinstance(metadatas[index], dict) else {}
+                    selected.append({
+                        "text": str(document)[:400],
+                        "source": str(metadata.get("source", "course material"))[:100],
+                    })
+                    retrieved_count += 1
+                retrieved[topic] = selected
             except Exception:
                 retrieved[topic] = []
 
@@ -606,7 +615,22 @@ def _feedback_node(
     )
     if not partial_topics:
         feedback = "## What You Did Well\nYour submission covered the assessed criteria."
+    elif state.get("feedback_draft"):
+        feedback = str(state["feedback_draft"]).strip()
+    elif len(state.get("submission_chunks") or _chunk_submission(state.get("raw_text", ""))) > 1:
+        # Multi-chunk synthesis already consumed the per-submission feedback
+        # call budget. Keep feedback useful without a fifth Groq request.
+        feedback = "## Conceptual Gaps & Misconceptions\nReview the specific rubric items listed below."
     elif weak_topics:
+        feedback_criteria = [
+            {
+                "topic": item.get("topic"),
+                "score": item.get("score"),
+                "max_points": item.get("max_points"),
+                "missing": [str(value)[:120] for value in (item.get("missing") or [])[:2]],
+            }
+            for item in partial_topics
+        ]
         result = _ask_json(
             settings.GROQ_MODEL,
             "Write accurate academic feedback in Markdown. Return JSON only with a feedback_markdown string. "
@@ -617,7 +641,7 @@ def _feedback_node(
                 if retrieved
                 else "Use only the supplied rubric evidence; do not invent course materials or citations."
             ),
-            f"Topics needing review (with rubric evidence and missing elements): {partial_topics}\nCourse context:\n{context}",
+            f"Partial rubric criteria only: {json.dumps(feedback_criteria, ensure_ascii=False)}\nCourse context (max 3 chunks, 400 chars each):\n{context}",
         )
         feedback = str(result.get("feedback_markdown", "")).strip()
         if not feedback:
