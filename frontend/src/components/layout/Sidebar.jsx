@@ -1,6 +1,6 @@
 import React from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { Compass, Settings } from 'lucide-react';
+import { Compass, GitBranch, Settings } from 'lucide-react';
 import { useCourse } from '../../context/CourseContext';
 import { useAuth } from '../../context/AuthContext';
 
@@ -45,6 +45,20 @@ export default function Sidebar({ isOpen, onClose, onOpenSettings }) {
               <Compass className="w-4 h-4 text-primary " />
               <span>Classes</span>
             </Link>
+            <a
+              href="/workflows.html"
+              onClick={() => {
+                if (window.innerWidth < 1024) onClose();
+              }}
+              className={`nav-link flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-medium transition-colors ${
+                location.pathname === '/workflows.html'
+                  ? 'bg-secondary text-primary font-semibold'
+                  : 'text-muted-foreground hover:bg-muted'
+              }`}
+            >
+              <GitBranch className="w-4 h-4 text-primary" />
+              <span>AI Workflows</span>
+            </a>
           </nav>
 
           {/* Teaching Section (if user has teaching courses or is faculty) */}

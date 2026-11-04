@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#eff5f1" />
+    <meta name="description" content="Explore the Vidyaranya assignment evaluation graph and live evaluation progress workflow." />
+    <title>AI Workflows · Vidyaranya</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #1c302a;
+        --muted: #62736c;
+        --paper: #eff5f1;
+        --card: #ffffff;
+        --line: #d8e4dc;
+        --green: #147d61;
+        --green-dark: #0a493a;
+        --mint: #e1f2ea;
+        --blue: #416b9c;
+        --blue-pale: #eaf1fa;
+        --amber: #986314;
+        --amber-pale: #fff4dc;
+        --red: #a74747;
+        --red-pale: #fbeaea;
+        --shadow: 0 18px 55px rgba(30, 66, 51, .08);
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        color: var(--ink);
+        background:
+          radial-gradient(ellipse at 12% -10%, rgba(178, 220, 198, .43), transparent 42rem),
+          var(--paper);
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        line-height: 1.5;
+      }
+      a { color: inherit; }
+      .shell { width: min(1120px, calc(100% - 40px)); margin: 0 auto; }
+      .topbar { height: 72px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid rgba(103, 138, 119, .18); }
+      .brand { display: inline-flex; align-items: center; gap: 11px; text-decoration: none; font-weight: 750; letter-spacing: -.025em; }
+      .brand-mark { width: 34px; height: 34px; border-radius: 11px; display: grid; place-items: center; color: white; background: linear-gradient(145deg, #168264, #07533e); box-shadow: 0 5px 14px rgba(20, 125, 97, .2); }
+      .brand-mark svg { width: 19px; height: 19px; }
+      .back-link { color: var(--muted); font-size: 13px; text-decoration: none; font-weight: 650; }
+      .back-link:hover { color: var(--green); }
+      main { padding: 54px 0 72px; }
+      .eyebrow { display: flex; align-items: center; gap: 9px; margin: 0 0 13px; color: var(--green); font-size: 11px; font-weight: 800; letter-spacing: .13em; text-transform: uppercase; }
+      .eyebrow::before { content: ""; width: 22px; height: 2px; background: currentColor; border-radius: 2px; }
+      h1, h2, h3, p { margin-top: 0; }
+      h1 { max-width: 760px; margin-bottom: 13px; font-size: clamp(34px, 5vw, 54px); line-height: 1.06; letter-spacing: -.05em; }
+      .intro { max-width: 720px; margin-bottom: 29px; color: var(--muted); font-size: 16px; }
+      .live-strip { padding: 18px 20px; margin-bottom: 31px; border: 1px solid #bbd9c9; border-radius: 16px; background: linear-gradient(110deg, #e1f2e9, #f7fbf8 78%); box-shadow: var(--shadow); }
+      .live-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 12px; }
+      .live-title { display: flex; align-items: center; gap: 9px; margin: 0; font-size: 14px; font-weight: 780; }
+      .live-dot { width: 8px; height: 8px; border-radius: 50%; background: #19a672; box-shadow: 0 0 0 4px rgba(25, 166, 114, .12); }
+      .live-badge, .tag { display: inline-flex; align-items: center; gap: 6px; padding: 5px 9px; border: 1px solid #c7ddd0; border-radius: 999px; color: #26684f; background: rgba(255,255,255,.67); font-size: 10px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; white-space: nowrap; }
+      .live-flow { display: grid; grid-template-columns: repeat(4, 1fr); gap: 28px; }
+      .live-step { position: relative; padding: 10px 12px; border: 1px solid rgba(192, 216, 201, .8); border-radius: 10px; background: rgba(255,255,255,.66); font-size: 12px; font-weight: 680; }
+      .live-step:not(:last-child)::after { content: "→"; position: absolute; right: -22px; top: 7px; color: #6e9d84; font-size: 16px; }
+      .live-step small { display: block; margin-top: 2px; color: var(--muted); font-size: 10px; font-weight: 500; }
+      .live-caption { margin: 11px 0 0; color: #557167; font-size: 11px; }
+      .tabs { display: inline-flex; gap: 5px; padding: 5px; margin-bottom: 16px; border: 1px solid var(--line); border-radius: 12px; background: rgba(255,255,255,.74); }
+      .tab { padding: 9px 14px; border: 0; border-radius: 8px; color: var(--muted); background: transparent; font: inherit; font-size: 12px; font-weight: 730; cursor: pointer; }
+      .tab[aria-selected="true"] { color: #fff; background: var(--green-dark); box-shadow: 0 2px 5px rgba(10,73,58,.15); }
+      .panel { padding: 26px; border: 1px solid var(--line); border-radius: 18px; background: rgba(255,255,255,.9); box-shadow: var(--shadow); }
+      .panel[hidden] { display: none; }
+      .panel-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; padding-bottom: 20px; border-bottom: 1px solid #e8eee9; }
+      .panel-head h2 { margin-bottom: 6px; font-size: 24px; letter-spacing: -.035em; }
+      .panel-head p { max-width: 680px; margin-bottom: 0; color: var(--muted); font-size: 13px; }
+      .tag.legacy { border-color: #ead8b5; color: #89601b; background: #fff9ec; }
+      .tag.active { border-color: #c4dfd0; color: #23684f; background: #edf8f1; }
+      .diagram { padding: 22px 0 8px; }
+      .node { padding: 13px 15px; border: 1px solid var(--line); border-radius: 12px; background: #fff; box-shadow: 0 4px 14px rgba(29, 64, 49, .045); }
+      .node-top { display: flex; align-items: center; gap: 9px; margin-bottom: 5px; }
+      .node-icon { width: 25px; height: 25px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 8px; color: var(--green); background: var(--mint); font-size: 12px; font-weight: 850; }
+      .node h3 { margin: 0; font-size: 13px; font-weight: 780; }
+      .node p { margin: 0; color: var(--muted); font-size: 11px; }
+      .node .micro { display: block; margin-top: 7px; color: #557167; font-size: 10px; font-weight: 690; }
+      .main-lane { display: grid; grid-template-columns: 1fr 1.25fr 1.1fr 1fr; align-items: stretch; gap: 28px; }
+      .lane-node { min-height: 106px; position: relative; }
+      .lane-node:not(:last-child)::after { content: ""; position: absolute; z-index: 0; width: 28px; height: 1px; top: 50%; right: -29px; background: #9ab9a6; }
+      .lane-node:not(:last-child)::before { content: ""; position: absolute; z-index: 1; top: calc(50% - 3px); right: -29px; border-top: 3px solid transparent; border-bottom: 3px solid transparent; border-left: 5px solid #78a28b; }
+      .executor { margin: 22px 0 17px; padding: 17px; border: 1px dashed #aacdb8; border-radius: 15px; background: #f7fbf8; }
+      .executor-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+      .executor-head strong { font-size: 12px; }
+      .executor-head span { color: var(--muted); font-size: 10px; }
+      .step-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+      .step-card { min-height: 112px; padding: 12px; border: 1px solid #e0eae3; border-radius: 11px; background: #fff; }
+      .step-card .step-no { display: inline-grid; place-items: center; width: 20px; height: 20px; margin-bottom: 7px; border-radius: 6px; color: #21674d; background: #e3f3e9; font-size: 10px; font-weight: 800; }
+      .step-card strong { display: block; margin-bottom: 4px; font-size: 11px; }
+      .step-card p { margin: 0; color: var(--muted); font-size: 10px; }
+      .loop-note { display: flex; justify-content: center; align-items: center; gap: 8px; color: #557167; font-size: 10px; }
+      .loop-note span { padding: 4px 8px; border: 1px solid #d9e6dd; border-radius: 999px; background: #fff; }
+      .callout { display: flex; gap: 11px; padding: 13px 15px; border: 1px solid #f0ddb5; border-radius: 12px; color: #71521b; background: var(--amber-pale); font-size: 11px; }
+      .callout strong { display: block; margin-bottom: 2px; color: #694b15; }
+      .callout p { margin: 0; }
+      .callout-icon { font-size: 15px; }
+      .progress-rail { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 23px; margin: 22px 0; }
+      .progress-node { position: relative; min-height: 138px; }
+      .progress-node:not(:last-child)::after { content: ""; position: absolute; width: 21px; height: 1px; top: 22px; right: -22px; background: #9bb3ce; }
+      .progress-node:not(:last-child)::before { content: ""; position: absolute; top: 19px; right: -22px; border-top: 3px solid transparent; border-bottom: 3px solid transparent; border-left: 5px solid #809bb9; }
+      .progress-node .node-icon { color: var(--blue); background: var(--blue-pale); }
+      .percent { display: inline-block; margin-top: 9px; padding: 3px 7px; border-radius: 6px; color: #42688f; background: var(--blue-pale); font-size: 10px; font-weight: 780; }
+      .branch-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 6px; }
+      .branch { padding: 13px 15px; border: 1px solid #e2e9e4; border-radius: 11px; background: #f9fbf9; }
+      .branch h3 { margin-bottom: 4px; font-size: 11px; }
+      .branch p { margin: 0; color: var(--muted); font-size: 10px; }
+      .branch.wait { border-color: #f0ddb5; background: #fffbf2; }
+      .branch.wait h3 { color: #845b12; }
+      .branch.error { border-color: #efcccc; background: #fff8f8; }
+      .branch.error h3 { color: var(--red); }
+      .branch-cycle { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 9px; color: #805b1c; font-size: 9px; font-weight: 760; }
+      .branch-cycle span { padding: 3px 6px; border: 1px solid #eddcb9; border-radius: 6px; background: rgba(255,255,255,.75); }
+      .poll-row { display: flex; align-items: center; gap: 10px; margin-top: 17px; padding: 12px 14px; border: 1px solid #dce6f0; border-radius: 11px; color: #446485; background: #f4f8fc; font-size: 11px; }
+      .poll-arrow { font-size: 17px; font-weight: 800; }
+      .recovery-row { display: flex; align-items: flex-start; gap: 10px; margin-top: 11px; padding: 12px 14px; border: 1px dashed #b7c9b9; border-radius: 11px; color: #58705f; background: #f8fbf7; font-size: 11px; }
+      details.source { margin-top: 17px; border-top: 1px solid #e8eee9; padding-top: 13px; }
+      details.source summary { width: fit-content; color: #557167; font-size: 11px; font-weight: 750; cursor: pointer; }
+      details.source pre { overflow: auto; padding: 15px; margin: 12px 0 0; border: 1px solid #dce8df; border-radius: 11px; color: #dbece2; background: #163b30; font: 11px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; tab-size: 4; }
+      .footnote { margin: 17px 1px 0; color: var(--muted); font-size: 10px; }
+      .footer { display: flex; justify-content: space-between; gap: 15px; margin-top: 20px; color: #829188; font-size: 10px; }
+      code { padding: 2px 5px; border-radius: 5px; color: #3b6353; background: #edf4ef; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+      @media (max-width: 760px) {
+        .shell { width: min(100% - 28px, 600px); }
+        main { padding-top: 36px; }
+        .live-flow { grid-template-columns: 1fr 1fr; gap: 9px; }
+        .live-step:not(:last-child)::after { display: none; }
+        .panel { padding: 18px; }
+        .panel-head { flex-direction: column; }
+        .main-lane { grid-template-columns: 1fr; gap: 12px; }
+        .lane-node { min-height: auto; }
+        .lane-node:not(:last-child)::after { width: 1px; height: 12px; top: auto; bottom: -13px; left: 50%; right: auto; }
+        .lane-node:not(:last-child)::before { top: auto; bottom: -13px; left: calc(50% - 2px); right: auto; transform: rotate(90deg); }
+        .step-grid { grid-template-columns: 1fr 1fr; }
+        .progress-rail { grid-template-columns: 1fr; gap: 12px; }
+        .progress-node { min-height: auto; }
+        .progress-node:not(:last-child)::after { width: 1px; height: 12px; top: auto; bottom: -13px; left: 13px; right: auto; }
+        .progress-node:not(:last-child)::before { top: auto; bottom: -13px; left: 11px; right: auto; transform: rotate(90deg); }
+        .branch-grid { grid-template-columns: 1fr; }
+        .footer { flex-direction: column; }
+      }
+      @media (max-width: 420px) {
+        .topbar { height: 62px; }
+        .back-link { font-size: 11px; }
+        .live-head { align-items: flex-start; flex-direction: column; }
+        .tabs { display: flex; width: 100%; }
+        .tab { flex: 1; padding: 9px 6px; font-size: 10px; }
+        .executor-head { align-items: flex-start; flex-direction: column; gap: 3px; }
+        .step-grid { grid-template-columns: 1fr; }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="shell topbar">
+      <a class="brand" href="/" aria-label="Vidyaranya home">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.2"/><circle cx="18" cy="6" r="2.2"/><circle cx="12" cy="18" r="2.2"/><path d="M8.2 6h7.6M7.4 7.8l3.3 7.9m5.9-7.9-3.3 7.9"/></svg>
+        </span>
+        <span>Vidyaranya <span style="color:#789087;font-weight:550">/ Workflow Atlas</span></span>
+      </a>
+      <a class="back-link" href="/">← Back to classes</a>
+    </header>
+
+    <main class="shell">
+      <p class="eyebrow">AI system map</p>
+      <h1>See how evaluation moves from upload to feedback.</h1>
+      <p class="intro">Two views explain the assessment system: the multi-step LangGraph design and the progress workflow students see while an evaluation is running.</p>
+
+      <section class="live-strip" aria-label="Current production grading path">
+        <div class="live-head">
+          <h2 class="live-title"><span class="live-dot" aria-hidden="true"></span>What runs for submissions today</h2>
+          <span class="live-badge">Active worker</span>
+        </div>
+        <div class="live-flow">
+          <div class="live-step">1. Read submission<small>Extract text from the uploaded file</small></div>
+          <div class="live-step">2. Find course context<small>Retrieve relevant indexed notes</small></div>
+          <div class="live-step">3. Grade with Groq<small>One grading request per attempt</small></div>
+          <div class="live-step">4. Check &amp; save<small>Local integrity check, then persist results</small></div>
+        </div>
+        <p class="live-caption">The submission worker currently uses this shorter path. The multi-step LangGraph below is implemented in the codebase but is not called by that worker.</p>
+      </section>
+
+      <div class="tabs" role="tablist" aria-label="Choose a workflow diagram">
+        <button class="tab" id="tab-evaluation" type="button" role="tab" aria-selected="true" aria-controls="panel-evaluation">Evaluation LangGraph</button>
+        <button class="tab" id="tab-progress" type="button" role="tab" aria-selected="false" aria-controls="panel-progress" tabindex="-1">Progress tracker</button>
+      </div>
+
+      <section class="panel" id="panel-evaluation" role="tabpanel" aria-labelledby="tab-evaluation">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">01 · Graph architecture</p>
+            <h2>Evaluation LangGraph</h2>
+            <p>The graph has a router, a step executor that loops through a selected plan, and a finalizer. Individual grading steps run inside the executor.</p>
+          </div>
+          <span class="tag legacy">Implemented · not active in worker</span>
+        </div>
+        <div class="diagram">
+          <div class="main-lane" aria-label="Start flows through router and step executor to finalization">
+            <article class="node lane-node">
+              <div class="node-top"><span class="node-icon">S</span><h3>START</h3></div>
+              <p>Submission text, assignment rubric, topics, and course ID enter the graph.</p>
+            </article>
+            <article class="node lane-node">
+              <div class="node-top"><span class="node-icon">1</span><h3>Router node</h3></div>
+              <p>Chooses a safe ordered plan and selects RAG or rubric feedback.</p>
+              <span class="micro">LLM request · deterministic fallback if plan is invalid</span>
+            </article>
+            <article class="node lane-node">
+              <div class="node-top"><span class="node-icon">2</span><h3>Execute plan</h3></div>
+              <p>Dispatches the next step, advances the plan index, and loops until done.</p>
+              <span class="micro">This is the graph's loop</span>
+            </article>
+            <article class="node lane-node">
+              <div class="node-top"><span class="node-icon">F</span><h3>Finalize</h3></div>
+              <p>Sets the final outcome to graded or flagged from the integrity result.</p>
+              <span class="micro">Then END</span>
+            </article>
+          </div>
+
+          <div class="executor">
+            <div class="executor-head"><strong>Steps dispatched inside Execute plan</strong><span>Run in this dependency order →</span></div>
+            <div class="step-grid">
+              <article class="step-card"><span class="step-no">01</span><strong>Integrity</strong><p>Local duplicate and similarity lookup against assignment submissions.</p><span class="micro">No LLM call</span></article>
+              <article class="step-card"><span class="step-no">02</span><strong>Coverage</strong><p>Scores rubric evidence across submission chunks; may synthesize combined evidence.</p><span class="micro">One or more LLM calls</span></article>
+              <article class="step-card"><span class="step-no">03</span><strong>Mastery &amp; depth</strong><p>Converts coverage into rubric points and a mastery band; rates conceptual depth.</p><span class="micro">Depth uses an LLM call</span></article>
+              <article class="step-card"><span class="step-no">04</span><strong>Feedback</strong><p>Retrieves relevant notes when available, then writes targeted feedback if needed.</p><span class="micro">RAG or rubric path · may call LLM</span></article>
+            </div>
+          </div>
+          <div class="loop-note"><span>More planned steps? Return to Execute plan</span><b aria-hidden="true">↻</b><span>No steps left? Continue to Finalize</span></div>
+          <div class="callout" style="margin-top:18px">
+            <span class="callout-icon" aria-hidden="true">ⓘ</span>
+            <p><strong>Why the old graph could hit rate limits</strong>The router, chunk scoring, optional synthesis, depth rating, and feedback can make several provider calls for one submission. The live worker uses one rubric grading request per attempt, followed by local integrity work.</p>
+          </div>
+        </div>
+        <p class="footnote">The exact number of graph calls varies with submission length, whether a reference solution is supplied, and whether targeted feedback is needed.</p>
+        <details class="source">
+          <summary>View or copy the Mermaid flowchart source</summary>
+          <pre><code>flowchart TD
+    S[Start] --&gt; R[Router · LLM picks a plan]
+    R --&gt; E[Execute next plan step]
+    E --&gt; I[Integrity · local similarity check]
+    E --&gt; C[Coverage · LLM evaluates submission chunks]
+    E --&gt; M[Mastery · totals rubric scores and asks LLM for depth]
+    E --&gt; F[RAG or rubric feedback · retrieval plus optional LLM]
+    I --&gt; E
+    C --&gt; E
+    M --&gt; E
+    F --&gt; E
+    E --&gt;|More steps| E
+    E --&gt;|Plan complete| X[Finalize · graded or flagged]</code></pre>
+        </details>
+      </section>
+
+      <section class="panel" id="panel-progress" role="tabpanel" aria-labelledby="tab-progress" hidden>
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">02 · Student-visible lifecycle</p>
+            <h2>Evaluation progress tracker</h2>
+            <p>This is the persisted worker status flow shown in the website. The frontend refreshes the status endpoint every three seconds while evaluation is pending or running.</p>
+          </div>
+          <span class="tag active">Live progress flow · not a LangGraph runtime</span>
+        </div>
+        <div class="diagram">
+          <div class="progress-rail" aria-label="Submission evaluation progress milestones">
+            <article class="node progress-node"><div class="node-top"><span class="node-icon">Q</span><h3>Queued</h3></div><p>Submission accepted and waiting for a worker.</p><span class="percent">0%</span></article>
+            <article class="node progress-node"><div class="node-top"><span class="node-icon">P</span><h3>Preparing</h3></div><p>Extract readable submission text.</p><span class="percent">10%</span></article>
+            <article class="node progress-node"><div class="node-top"><span class="node-icon">R</span><h3>Retrieving</h3></div><p>Find relevant indexed course materials.</p><span class="percent">25%</span></article>
+            <article class="node progress-node"><div class="node-top"><span class="node-icon">G</span><h3>Grading</h3></div><p>One grading request for this attempt.</p><span class="percent">45%</span></article>
+            <article class="node progress-node"><div class="node-top"><span class="node-icon">I</span><h3>Originality</h3></div><p>Run the local integrity check.</p><span class="percent">80%</span></article>
+            <article class="node progress-node"><div class="node-top"><span class="node-icon">V</span><h3>Saving</h3></div><p>Persist score, mastery, and feedback.</p><span class="percent">92%</span></article>
+            <article class="node progress-node"><div class="node-top"><span class="node-icon">✓</span><h3>Complete</h3></div><p>Evaluation is available when released.</p><span class="percent">100%</span></article>
+          </div>
+
+          <div class="branch-grid" aria-label="Evaluation wait and error branches">
+            <article class="branch wait"><h3>429 · Waiting for AI capacity (45%)</h3><p>Honor the provider cooldown, then retry the grading request. If the remaining quota reset is too far away or retries run out, mark it “Retry required.”</p><div class="branch-cycle" aria-label="Grading goes to waiting on a rate limit, then returns to grading after cooldown"><span>Grading</span><b>→ 429 →</b><span>Waiting</span><b>↶ cooldown</b><span>Grading retry</span></div></article>
+            <article class="branch error"><h3>Other branches from grading</h3><p>Unreadable text during preparation → “Needs teacher review.” Other service errors → “Retry required” for instructor retry.</p></article>
+          </div>
+          <div class="poll-row"><span class="poll-arrow" aria-hidden="true">↻</span><span><strong>Website status refresh:</strong> Student page polls the AI status endpoint every 3 seconds while the submission is pending or evaluating. Displayed percentages are saved milestones, not a time estimate.</span></div>
+          <div class="recovery-row"><span aria-hidden="true">⤺</span><span><strong>Service restart recovery:</strong> If a restart interrupts a submission in preparation, material retrieval, or grading, startup recovery resets it to the queued state so the worker can pick it up again.</span></div>
+          <p class="footnote">Completed submissions end at 100%. A 429 cooldown may pause progress at 45% while the worker waits for provider capacity.</p>
+        </div>
+        <details class="source">
+          <summary>View or copy the Mermaid flowchart source</summary>
+          <pre><code>flowchart TD
+    S[Submission accepted] --&gt; Q[Queued · 0%]
+    Q --&gt; P[Preparing submission · 10%]
+    P --&gt; R[Retrieving course materials · 25%]
+    R --&gt; G[Grading with AI · 45%]
+
+    G --&gt;|429 rate limit| W[Waiting for AI capacity · 45%]
+    W --&gt;|Cooldown ends; retry| G
+
+    G --&gt;|Grade returned| I[Checking originality · 80%]
+    I --&gt; V[Saving results · 92%]
+    V --&gt; C[Complete · 100%]
+
+    P --&gt;|No readable text| H[Needs teacher review]
+    G --&gt;|Other service error| E[Retry required]
+    G --&gt;|Quota reset is too far away| E
+
+    P -. Service restarts .-&gt; Q
+    R -. Service restarts .-&gt; Q
+    G -. Service restarts .-&gt; Q
+
+    Q --&gt; UI[Website polls saved progress every 3 seconds]
+    P --&gt; UI
+    R --&gt; UI
+    G --&gt; UI
+    W --&gt; UI
+    I --&gt; UI
+    V --&gt; UI
+    C --&gt; UI
+    H --&gt; UI
+    E --&gt; UI</code></pre>
+        </details>
+      </section>
+
+      <div class="footer"><span>Vidyaranya · AI assessment workflows</span><span>Workflow details reflect the current repository implementation.</span></div>
+    </main>
+    <script>
+      const tabs = [...document.querySelectorAll('[role="tab"]')];
+      const panels = [...document.querySelectorAll('[role="tabpanel"]')];
+      function activateTab(tab, moveFocus = false) {
+        tabs.forEach((item) => {
+          const selected = item === tab;
+          item.setAttribute('aria-selected', String(selected));
+          item.tabIndex = selected ? 0 : -1;
+        });
+        panels.forEach((panel) => { panel.hidden = panel.id !== tab.getAttribute('aria-controls'); });
+        if (moveFocus) tab.focus();
+      }
+      tabs.forEach((tab, index) => {
+        tab.addEventListener('click', () => activateTab(tab));
+        tab.addEventListener('keydown', (event) => {
+          if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+          event.preventDefault();
+          const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length;
+          activateTab(tabs[next], true);
+        });
+      });
+    </script>
+  </body>
+</html>
