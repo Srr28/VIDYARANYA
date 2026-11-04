@@ -1,8 +1,34 @@
+import fnmatch
 from types import SimpleNamespace
 
 import pytest
 
 from app.services.agents import eval_graph
+
+
+@pytest.fixture(autouse=True)
+def memory_checkpoint_redis(monkeypatch):
+    class MemoryRedis:
+        def __init__(self):
+            self.values = {}
+
+        def get(self, key):
+            return self.values.get(key)
+
+        def set(self, key, value, ex=None):
+            self.values[key] = value
+            return True
+
+        def scan_iter(self, match):
+            return (key for key in self.values if fnmatch.fnmatch(key, match))
+
+        def delete(self, *keys):
+            for key in keys:
+                self.values.pop(key, None)
+
+    memory = MemoryRedis()
+    monkeypatch.setattr(eval_graph, "_groq_redis", lambda: memory)
+    return memory
 
 
 def test_mastery_matches_criterion_with_extra_whitespace_and_case(monkeypatch):
@@ -61,7 +87,7 @@ def test_prepare_selects_rubric_feedback_when_course_material_is_missing(monkeyp
 def test_single_chunk_uses_one_grade_call_and_returns_mastery_shape(monkeypatch):
     calls = []
 
-    def ask(model, system, user):
+    def ask(model, system, user, **_kwargs):
         calls.append((system, user))
         return {"c": [{"t": "BST Search", "s": 8, "e": ["Correct branch traversal"], "m": []}],
                 "b": {"s": 4, "l": "analytical"}}
@@ -122,7 +148,7 @@ def test_feedback_context_is_limited_to_three_400_char_chunks(monkeypatch):
     monkeypatch.setattr(eval_graph, "_encode_texts", lambda _texts: [[0.1, 0.2]])
     captured = []
 
-    def ask(_model, _system, user):
+    def ask(_model, _system, user, **_kwargs):
         captured.append(user)
         return {"feedback_markdown": "Review the concepts."}
 
@@ -205,3 +231,38 @@ def test_rate_headers_record_remaining_tokens_and_reset(monkeypatch):
     remaining, reset_at = eval_graph._GROQ_PROVIDER_LIMITS["model-header"]
     assert remaining == 1200
     assert reset_at > eval_graph.time.monotonic() + 60
+
+
+def test_feedback_rate_limit_resumes_from_grade_checkpoint(monkeypatch):
+    monkeypatch.setattr(eval_graph.CHROMA_CLIENT, "get_collection", lambda **_kwargs: (_ for _ in ()).throw(ValueError("missing")))
+    monkeypatch.setitem(eval_graph._EVALUATION_STEPS, "integrity", lambda _state: {
+        "integrity_score": 1.0, "plagiarism_flag": False, "plagiarism_matches": []
+    })
+    calls = {"grade": 0, "feedback": 0}
+
+    def ask(_model, system, _user, **_kwargs):
+        if system == eval_graph._GRADE_SYSTEM:
+            calls["grade"] += 1
+            return {
+                "c": [{"t": "Criterion", "s": 5, "e": ["partial evidence"], "m": ["missing detail"]}],
+                "b": {"s": 2, "l": "understanding"},
+            }
+        calls["feedback"] += 1
+        if calls["feedback"] == 1:
+            raise RuntimeError("429 rate limit")
+        return {"feedback_markdown": "Review the missing detail."}
+
+    monkeypatch.setattr(eval_graph, "_ask_json", ask)
+    initial = {
+        "submission_id": "sub-resume", "assignment_id": "assignment-resume",
+        "course_id": "course-resume", "raw_text": "answer",
+        "rubric": [{"criterion": "Criterion", "max_points": 10}], "max_score": 10,
+    }
+    with pytest.raises(RuntimeError, match="429"):
+        eval_graph._run_sequential(initial)
+    assert calls["grade"] == 1
+
+    result = eval_graph._run_sequential(initial)
+    assert calls["grade"] == 1
+    assert calls["feedback"] == 2
+    assert result["final_status"] == "graded"

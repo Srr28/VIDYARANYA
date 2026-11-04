@@ -28,7 +28,12 @@ from app.models.course import Course
 from app.models.note import Note
 from app.models.submission import Submission
 from app.models.submission_text import SubmissionText
-from app.services.agents.eval_graph import GroqDailyBudgetDeferred, integrity_node, run_evaluation_graph
+from app.services.agents.eval_graph import (
+    GroqDailyBudgetDeferred,
+    delete_evaluation_checkpoints,
+    integrity_node,
+    run_evaluation_graph,
+)
 from app.services.grading_service import grade
 from app.services.ocr_service import extract_text_from_bytes
 from app.services.queue_service import get_redis_settings, queue_service
@@ -352,6 +357,10 @@ async def evaluate_submission_task(ctx: dict[str, Any], submission_id: str) -> d
 
         db.commit()
         db.refresh(submission)
+        if evaluation_state is not None:
+            # Keep resumable checkpoints until the final score and feedback
+            # are durable in the database.
+            await asyncio.to_thread(delete_evaluation_checkpoints, evaluation_state)
         # Build assignment analytics once every submitted file has reached a
         # terminal evaluation state. Teachers can refresh the class report on demand.
         if submission.status in {"graded", "flagged"}:

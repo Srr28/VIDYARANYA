@@ -288,6 +288,85 @@ def _record_daily_token_usage(actual_tokens: int) -> None:
         logger.warning("Could not update Groq daily token counter", exc_info=True)
 
 
+def _evaluation_fingerprint(state: EvaluationState) -> str:
+    payload = "\0".join((
+        str(state.get("raw_text") or ""),
+        json.dumps(state.get("rubric") or [], ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        str(state.get("reference_digest") or state.get("reference_solution") or ""),
+    ))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _checkpoint_key(state: EvaluationState, step: str) -> str | None:
+    submission_id = state.get("submission_id")
+    if not submission_id:
+        return None
+    return f"vidyaranya:evalckpt:{submission_id}:{_evaluation_fingerprint(state)}:{step}"
+
+
+def _load_checkpoint(state: EvaluationState, step: str) -> dict[str, Any] | None:
+    key = _checkpoint_key(state, step)
+    if not key:
+        return None
+    try:
+        client = _groq_redis()
+        raw = client.get(key) if client is not None else None
+        value = json.loads(raw) if raw else None
+        if isinstance(value, dict):
+            stats = getattr(_GROQ_STATS_LOCAL, "value", None)
+            if stats is not None:
+                stats["checkpoint_hits"] += 1
+            return value
+    except Exception:
+        logger.warning("Could not read evaluation checkpoint %s; continuing without it", step, exc_info=True)
+    return None
+
+
+def _save_checkpoint(state: EvaluationState, step: str, value: dict[str, Any]) -> None:
+    key = _checkpoint_key(state, step)
+    if not key:
+        return
+    try:
+        client = _groq_redis()
+        if client is not None:
+            client.set(key, json.dumps(value, ensure_ascii=False, separators=(",", ":")), ex=2 * 60 * 60)
+    except Exception:
+        logger.warning("Could not write evaluation checkpoint %s; continuing without it", step, exc_info=True)
+
+
+def _checkpointed_json(
+    state: EvaluationState,
+    step: str,
+    model: str,
+    system: str,
+    user: str,
+    *,
+    max_completion_tokens: int = 900,
+) -> dict[str, Any]:
+    cached = _load_checkpoint(state, step)
+    if cached is not None:
+        return cached
+    value = _ask_json(model, system, user, max_completion_tokens=max_completion_tokens)
+    _save_checkpoint(state, step, value)
+    return value
+
+
+def delete_evaluation_checkpoints(state: EvaluationState) -> None:
+    """Remove all checkpoints for a submission after its final DB commit."""
+    submission_id = state.get("submission_id")
+    if not submission_id:
+        return
+    try:
+        client = _groq_redis()
+        if client is None:
+            return
+        keys = list(client.scan_iter(match=f"vidyaranya:evalckpt:{submission_id}:*"))
+        if keys:
+            client.delete(*keys)
+    except Exception:
+        logger.warning("Could not delete completed evaluation checkpoints for %s", submission_id, exc_info=True)
+
+
 def _ask_json(
     model: str,
     system: str,
@@ -648,6 +727,9 @@ def _build_mastery(state: EvaluationState, coverage: list[dict[str, Any]], depth
 
 def grade_node(state: EvaluationState) -> EvaluationState:
     """Score each text chunk once, synthesize only multi-chunk work, then map to the stable result shape."""
+    cached_grade = _load_checkpoint(state, "grade_result")
+    if cached_grade is not None:
+        return cached_grade
     topics = _rubric_topics(state)
     chunks = list(state.get("submission_chunks") or _chunk_submission(state.get("raw_text", "")))
     if not chunks:
@@ -665,11 +747,15 @@ def grade_node(state: EvaluationState) -> EvaluationState:
     depths: list[dict[str, Any]] = []
     for index, chunk in enumerate(chunks, start=1):
         user = f"{static_context}\nSubmission part {index}/{len(chunks)} (score evidence in this part only):\n{chunk}"
-        result = _ask_json(settings.GROQ_MODEL, _GRADE_SYSTEM, user)
+        result = _checkpointed_json(state, f"grade_chunk_{index}", settings.GROQ_MODEL, _GRADE_SYSTEM, user)
         coverage, depth = _map_compact_coverage(result, topics, str(state.get("submission_id", "unknown")), f"chunk {index}")
         if not result.get("c") and not result.get("topics"):
             logger.warning("Invalid grading JSON for submission %s chunk %d; retrying once strictly", state.get("submission_id"), index)
-            strict = _ask_json(settings.GROQ_MODEL, _GRADE_SYSTEM + " Your prior JSON was invalid. Return a non-empty c array and b object exactly as specified.", user)
+            strict = _checkpointed_json(
+                state, f"grade_chunk_{index}_strict", settings.GROQ_MODEL,
+                _GRADE_SYSTEM + " Your prior JSON was invalid. Return a non-empty c array and b object exactly as specified.",
+                user,
+            )
             if strict.get("c") or strict.get("topics"):
                 result = strict
                 coverage, depth = _map_compact_coverage(result, topics, str(state.get("submission_id", "unknown")), f"chunk {index} retry")
@@ -698,7 +784,10 @@ def grade_node(state: EvaluationState) -> EvaluationState:
             synthesis_user = "\n".join((static_context, "Evidence by criterion from all parts (overlap may repeat):", json.dumps(compact, ensure_ascii=False)))
             if len(synthesis_user) <= MAX_GROQ_USER_CHARS:
                 break
-        synthesis = _ask_json(settings.GROQ_MODEL, _SYNTHESIS_SYSTEM, synthesis_user, max_completion_tokens=700)
+        synthesis = _checkpointed_json(
+            state, "grade_synthesis", settings.GROQ_MODEL, _SYNTHESIS_SYSTEM, synthesis_user,
+            max_completion_tokens=700,
+        )
         synthesized, final_depth = _map_compact_coverage(synthesis, topics, str(state.get("submission_id", "unknown")), "synthesis")
         synth_by_topic = {_norm_criterion(item["topic"]): item for item in synthesized}
         for item in merged:
@@ -710,13 +799,18 @@ def grade_node(state: EvaluationState) -> EvaluationState:
         feedback_draft = str(synthesis.get("f") or "").strip()
 
     mastery = _build_mastery(state, merged, final_depth)
-    return {"topic_coverage": merged, "mastery_result": mastery, "feedback_draft": feedback_draft}
+    updates = {"topic_coverage": merged, "mastery_result": mastery, "feedback_draft": feedback_draft}
+    _save_checkpoint(state, "grade_result", updates)
+    return updates
 
 
 def _feedback_node(
     state: EvaluationState,
     use_course_materials: bool,
 ) -> EvaluationState:
+    cached_feedback = _load_checkpoint(state, "feedback_result")
+    if cached_feedback is not None:
+        return cached_feedback
     mastery = state.get("mastery_result", {})
     topic_scores = mastery.get("topic_scores", [])
     weak_topics = [
@@ -786,7 +880,9 @@ def _feedback_node(
             }
             for item in partial_topics
         ]
-        result = _ask_json(
+        result = _checkpointed_json(
+            state,
+            "feedback",
             settings.GROQ_MODEL,
             "Write accurate academic feedback in Markdown. Return JSON only with a feedback_markdown string. "
             "Include What You Did Well, Conceptual Gaps & Misconceptions, and a Targeted Action Plan. "
@@ -820,7 +916,9 @@ def _feedback_node(
     if review_lines:
         feedback += "\n\n## Specific Items to Review\n" + "\n".join(review_lines)
 
-    return {"retrieved_chunks": retrieved, "feedback_markdown": feedback}
+    updates = {"retrieved_chunks": retrieved, "feedback_markdown": feedback}
+    _save_checkpoint(state, "feedback_result", updates)
+    return updates
 
 
 def rag_feedback_node(state: EvaluationState) -> EvaluationState:
